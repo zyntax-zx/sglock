@@ -273,10 +273,8 @@ void BackgroundInjectionThread() {
     AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
     AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
 
-    // Inyectar Master Switch a la Interfaz del Motor
-    InjectMasterSwitchUI();
-
     bool hookApplied = false;
+    bool uiInjected = false;
 
     // Bucle de espera pasiva hasta encontrar la instancia de HUD
     while (!hookApplied) {
@@ -287,6 +285,12 @@ void BackgroundInjectionThread() {
         
         uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
         if (localPlayer) {
+            
+            // Safe Start: Inyectar UI solo cuando el juego haya cargado el mundo físico
+            if (!uiInjected) {
+                InjectMasterSwitchUI();
+                uiInjected = true;
+            }
             
             uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
             if (playerController) {
