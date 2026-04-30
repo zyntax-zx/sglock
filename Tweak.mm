@@ -45,7 +45,6 @@ constexpr uintptr_t OFF_Pawn              = 0x3d0;  // APlayerController -> APaw
 constexpr uintptr_t OFF_RootComp          = 0x130;  // AActor -> RootComponent
 constexpr uintptr_t OFF_RelativeLoc       = 0x11c;  // USceneComponent -> RelativeLocation
 constexpr uintptr_t OFF_WeaponID          = 0x618;  // APawn -> WeaponID (Ajustar si es necesario)
-constexpr uintptr_t OFF_Health            = 0x67c;  // AActor -> Health
 
 #define IS_VALID_PTR(p)    ((uintptr_t)(p) > 0x100000000ULL)
 #define IS_ALIGNED_PTR(p)  (((uintptr_t)(p) & 0x7) == 0)
