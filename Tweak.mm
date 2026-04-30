@@ -6,6 +6,7 @@
 #include <thread>
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 // ============================================================================
 // [1. ESTRUCTURAS MATEMÁTICAS]
@@ -30,18 +31,18 @@ static FRotator VecToRot(FVector d) {
 }
 
 // ============================================================================
-// [2. TRUTH TABLE v6.0 — LECTURA PURA (PAC-SAFE)]
+// [2. TRUTH TABLE v7.0 — ESCANEO PASIVO GUOBJECTARRAY]
 // ============================================================================
 
-// Anclas globales (Sección __DATA)
-constexpr uintptr_t ADDR_LOCAL_PLAYER    = 0x951788; // _g_LocalPlayer
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray
-constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
-constexpr uintptr_t TOGGLE_SHORTGUN       = 0x9516b2; // bool _SHORTGUNWP
+constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray Maestro
+constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico Rotación
+constexpr uintptr_t TOGGLE_SHORTGUN       = 0x9516b2; // bool _ShortGunWP (Nota: con R)
 
-// Offsets Estándar / Ghidra Verified
-constexpr uintptr_t OFF_PLAYER_CTRL       = 0x548;  // LocalPlayer -> Controller (User Verified)
-constexpr uintptr_t OFF_Pawn              = 0x3d0;  // Controller -> Pawn
+// Offsets de Estructura Interna (Pure Read)
+constexpr uintptr_t OFF_Obj_Class         = 0x10;
+constexpr uintptr_t OFF_Obj_Name          = 0x18;
+constexpr uintptr_t OFF_Player_Player     = 0x30;   // APlayerController -> UPlayer*
+constexpr uintptr_t OFF_Pawn              = 0x3d0;  // APlayerController -> APawn
 constexpr uintptr_t OFF_RootComp          = 0x130;  // AActor -> RootComponent
 constexpr uintptr_t OFF_RelativeLoc       = 0x11c;  // SceneComponent -> Location
 
@@ -59,57 +60,75 @@ static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
 // ============================================================================
 
 static bool g_Active = false;
+static uintptr_t g_CachedPlayerController = 0;
 
 // ============================================================================
-// [4. LÓGICA DE AIMLOCK PASIVA (v6.0)]
+// [4. LÓGICA DE ESCANEO PASIVO (v7.0)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
-    // Paso 1: Validación de Toggles
-    if (!g_Active) return;
-    
+    // ── Heartbeat Obligatorio ──────────────────────────────────────────────
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] Tick activo - Boton: %d", g_Active);
+
+    if (!g_Active) {
+        g_CachedPlayerController = 0;
+        return;
+    }
+
+    // ── Validación de Toggle dinámico ShortGun ──────────────────────────────
     bool gameToggle = *reinterpret_cast<bool*>(OFF(TOGGLE_SHORTGUN));
     if (!gameToggle) return;
 
-    // Paso 2: Obtener LocalPlayer (0x951788)
-    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER));
-    if (!IS_SAFE_PTR(lpPtr)) return;
-
-    // Paso 3: Obtener Controller y Pawn
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
-    if (!IS_SAFE_PTR(ctrl)) return;
-
-    uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
-    if (!IS_SAFE_PTR(myPawn)) return;
-
-    // Paso 4: Iteración de Objetos (GUObjectArray) para buscar enemigo
+    // ── Paso 1: Escaneo de GUObjectArray (0x951778) ─────────────────────────
     uintptr_t objArrayBase = OFF(ADDR_GOBJECTS);
+    if (!IS_SAFE_PTR(objArrayBase)) return;
+
     uintptr_t objects = *reinterpret_cast<uintptr_t*>(objArrayBase + 0x10);
     int numObjects = *reinterpret_cast<int*>(objArrayBase + 0x18);
     
     if (!IS_SAFE_PTR(objects) || numObjects <= 0) return;
 
-    uintptr_t bestEnemy = 0;
-    float minDist = 999999.0f;
-    
-    // Obtenemos mi posición una vez para comparar
+    // Buscar el PlayerController si no está en caché
+    if (!IS_SAFE_PTR(g_CachedPlayerController)) {
+        int scanLimit = (numObjects > 20000) ? 20000 : numObjects;
+        for (int i = 0; i < scanLimit; i++) {
+            uintptr_t item = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
+            if (!IS_SAFE_PTR(item)) continue;
+
+            // Identificación por estructura: PlayerController tiene un UPlayer* en 0x30
+            uintptr_t player = *reinterpret_cast<uintptr_t*>(item + OFF_Player_Player);
+            if (IS_SAFE_PTR(player)) {
+                g_CachedPlayerController = item;
+                NSLog(@"[SGLOCK_DEBUG] Jugador encontrado (Controller): 0x%lX", item);
+                break;
+            }
+        }
+    }
+
+    if (!IS_SAFE_PTR(g_CachedPlayerController)) return;
+
+    // ── Paso 2: Localizar Enemigo más cercano ───────────────────────────────
+    uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(g_CachedPlayerController + OFF_Pawn);
+    if (!IS_SAFE_PTR(myPawn)) return;
+
     uintptr_t myRoot = *reinterpret_cast<uintptr_t*>(myPawn + OFF_RootComp);
     if (!IS_SAFE_PTR(myRoot)) return;
     FVector myPos = *reinterpret_cast<FVector*>(myRoot + OFF_RelativeLoc);
 
-    // Escaneo optimizado
-    int maxScan = (numObjects > 15000) ? 15000 : numObjects;
-    for (int i = 0; i < maxScan; i++) {
-        uintptr_t item = *reinterpret_cast<uintptr_t*>(objects + (i * 24)); 
+    uintptr_t bestEnemy = 0;
+    float minDist = 999999.0f;
+
+    // Escaneo rápido de actores
+    for (int i = 0; i < 15000 && i < numObjects; i++) {
+        uintptr_t item = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
         if (!IS_SAFE_PTR(item) || item == myPawn) continue;
-        
+
         uintptr_t root = *reinterpret_cast<uintptr_t*>(item + OFF_RootComp);
         if (!IS_SAFE_PTR(root)) continue;
 
         FVector enPos = *reinterpret_cast<FVector*>(root + OFF_RelativeLoc);
         float d = myPos.Dist(enPos);
-        
-        if (d < minDist && d > 1.0f) { // d > 1.0f para no detectarse a sí mismo
+        if (d < minDist && d > 50.0f) { // d > 50.0f para ignorar items/props cercanos
             minDist = d;
             bestEnemy = item;
         }
@@ -117,23 +136,18 @@ static void AimlockTick(bool doLog) {
 
     if (!IS_SAFE_PTR(bestEnemy)) return;
 
-    // Paso 5: Cálculo de Rotación
+    // ── Paso 3: Cálculo y Escritura Directa ─────────────────────────────────
     uintptr_t enRoot = *reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp);
-    if (!IS_SAFE_PTR(enRoot)) return;
     FVector targetPos = *reinterpret_cast<FVector*>(enRoot + OFF_RelativeLoc);
-    
     FRotator tgtRot = VecToRot(targetPos - myPos);
 
-    // Paso 6: Escritura de Rotación (Directa — PAC-SAFE)
-    // Lee el offset dinámico guardado en 0x951658
+    // Lee el offset dinámico de rotación (PAC-SAFE)
     uintptr_t dynamicRotOffset = *reinterpret_cast<uintptr_t*>(OFF(ADDR_ROT_BASE_OFF));
-    
-    // Si el offset es basura, no escribimos (prevenir crash)
     if (dynamicRotOffset > 0 && dynamicRotOffset < 0x2000) {
-        uintptr_t rotAddr = ctrl + dynamicRotOffset;
+        uintptr_t rotAddr = g_CachedPlayerController + dynamicRotOffset;
         if (IS_SAFE_PTR(rotAddr)) {
             *reinterpret_cast<FRotator*>(rotAddr) = tgtRot;
-            if (doLog) NSLog(@"[SGLOCK] Aimlock Activo en: 0x%lX", rotAddr);
+            if (doLog) NSLog(@"[SGLOCK_DEBUG] Aimlock aplicado: 0x%lX", rotAddr);
         }
     }
 }
@@ -147,17 +161,17 @@ static void AimlockTick(bool doLog) {
 @end
 
 @implementation SGLockDriver
-static int tickCount = 0;
+static int g_LogCounter = 0;
 
 - (void)start {
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onFrame:)];
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    NSLog(@"[SGLOCK] v6.0 iniciada. Modo Lectura Pura.");
+    NSLog(@"[SGLOCK_DEBUG] v7.0 Modo Escaneo Pasivo Iniciado.");
 }
 
 - (void)onFrame:(CADisplayLink*)link {
-    bool doLog = (++tickCount >= 60);
-    if (doLog) tickCount = 0;
+    bool doLog = (++g_LogCounter >= 60);
+    if (doLog) g_LogCounter = 0;
     AimlockTick(doLog);
 }
 @end
@@ -175,6 +189,7 @@ static SGLockDriver* g_Driver = nil;
 - (void)toggle {
     g_Active = !g_Active;
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
+    NSLog(@"[SGLOCK_DEBUG] TOGGLE MANUAL: %d", g_Active);
 }
 @end
 
@@ -188,6 +203,8 @@ static void InjectUI() {
         btn.frame = CGRectMake(20, 100, 44, 44);
         btn.layer.cornerRadius = 22;
         btn.backgroundColor = UIColor.redColor;
+        btn.layer.borderWidth = 2;
+        btn.layer.borderColor = UIColor.whiteColor.CGColor;
         [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [win addSubview:btn];
 
@@ -202,7 +219,9 @@ static void InjectUI() {
 
 __attribute__((constructor))
 static void init() {
+    // Delay de 10s para estabilidad
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         InjectUI();
+        NSLog(@"[SGLOCK_DEBUG] Heartbeat v7.0 Online.");
     });
 }
