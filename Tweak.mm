@@ -37,7 +37,6 @@ static float NormAxis(float a) {
 // ============================================================================
 
 // Anclas del motor
-constexpr uintptr_t ADDR_GUOBJECT_ARRAY   = 0x9515A0; // FUObjectArray
 constexpr uintptr_t ADDR_GWORLD           = 0x951770; // UWorld*
 constexpr uintptr_t VTABLE_PROCESS_EVENT  = 0x260;    // Índice en VTable
 
@@ -55,9 +54,7 @@ constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;
 constexpr int       STATE_KNOCKED         = 0x92f92;
 
 // FUObjectArray layout (UE4 ARM64)
-constexpr uintptr_t OFF_OBJARRAY_DATA     = 0x10; // ObjObjects.Objects ptr
-constexpr uintptr_t OFF_OBJARRAY_NUM      = 0x18; // NumElements
-constexpr uintptr_t FUOBJECTITEM_SIZE     = 0x18; // sizeof(FUObjectItem)
+
 
 // GWorld → HUD path
 constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
