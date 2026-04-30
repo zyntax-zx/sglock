@@ -182,9 +182,13 @@ static void init_tweak() {
         uintptr_t onPelletsAddr = getRealOffset(HOOK_ON_PELLETS);
 
         if (onPelletsAddr) {
-            // PRUEBA DE MEMORIA: Verificamos si la dirección existe y es legible sin parchearla.
-            uint32_t first_instruction = *reinterpret_cast<uint32_t*>(onPelletsAddr);
-            printf("[SGLOCK] MEM TEST EXITOSO. Instruccion en 0x%lX: 0x%X\n", onPelletsAddr, first_instruction);
+            // Implementar el hook con Dobby (DobbyHook)
+            // IMPORTANTE: Requiere Entitlement 'get-task-allow' (JIT) en dispositivos no-jailbroken.
+            DobbyHook(reinterpret_cast<void*>(onPelletsAddr), 
+                      reinterpret_cast<void*>(hooked_OnPelletsOnShotChanged), 
+                      reinterpret_cast<void**>(&orig_OnPelletsOnShotChanged));
+            
+            printf("[SGLOCK] Inicializado correctamente tras 5s. Hook activo en: 0x%lX\n", onPelletsAddr);
         }
     }).detach();
 }
