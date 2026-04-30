@@ -146,30 +146,41 @@ void (*AddControllerYawInput)(void*, float);
 void (*AddControllerPitchInput)(void*, float);
 
 // ============================================================================
-// [6. VTABLE HOOK ENGINE (JAILED SAFE - __DATA)]
+// [6. SHADOW VTABLE HOOK (JAILED SAFE - INSTANCE SWAP)]
 // ============================================================================
 
-bool ApplyVTableHookByByteOffset(void* instance, size_t byteOffset, void* hookedFunc, void** origFuncOut) {
+#ifdef __arm64e__
+#define STRIP_PAC(x) ((uintptr_t)(x) & 0x0000000fffffffffULL)
+#else
+#define STRIP_PAC(x) ((uintptr_t)(x))
+#endif
+
+bool ApplyShadowVTableHook(void* instance, size_t byteOffset, void* hookedFunc, void** origFuncOut) {
     if (!instance) return false;
     
-    uintptr_t* vtable = *reinterpret_cast<uintptr_t**>(instance);
-    if (!vtable) return false;
+    // El puntero a la VTable original reside en los primeros 8 bytes de la instancia
+    uintptr_t* originalVTable = *reinterpret_cast<uintptr_t**>(instance);
+    if (!originalVTable) return false;
+
+    // Clonación de VTable en el Heap (Memoria propia = 0 sospechas del kernel)
+    int vtableLength = 350; // Tamaño generoso (El offset 0x260 es índice 76)
+    uintptr_t* shadowVTable = new uintptr_t[vtableLength];
+    memcpy(shadowVTable, originalVTable, vtableLength * sizeof(uintptr_t));
 
     int vtableIndex = byteOffset / sizeof(uintptr_t);
 
     if (origFuncOut) {
-        *origFuncOut = reinterpret_cast<void*>(vtable[vtableIndex]);
+        // Almacenamos el puntero original eliminando la firma PAC si estamos en arm64e
+        *origFuncOut = reinterpret_cast<void*>(STRIP_PAC(originalVTable[vtableIndex]));
     }
 
-    size_t pageSize = sysconf(_SC_PAGESIZE);
-    uintptr_t pageStart = reinterpret_cast<uintptr_t>(&vtable[vtableIndex]) & ~(pageSize - 1);
+    // Reemplazamos la función deseada en nuestra copia plana
+    shadowVTable[vtableIndex] = reinterpret_cast<uintptr_t>(hookedFunc);
     
-    if (mprotect(reinterpret_cast<void*>(pageStart), pageSize, PROT_READ | PROT_WRITE) == 0) {
-        vtable[vtableIndex] = reinterpret_cast<uintptr_t>(hookedFunc);
-        mprotect(reinterpret_cast<void*>(pageStart), pageSize, PROT_READ);
-        return true;
-    }
-    return false;
+    // Instance Swap: Apuntamos el objeto a nuestra nueva VTable modificada
+    *reinterpret_cast<uintptr_t**>(instance) = shadowVTable;
+
+    return true;
 }
 
 // ============================================================================
@@ -297,14 +308,14 @@ void BackgroundInjectionThread() {
             uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
             if (IS_VALID_PTR(playerController)) {
                 
-                // VTable Swap manual en el segmento __DATA
-                hookApplied = ApplyVTableHookByByteOffset(reinterpret_cast<void*>(playerController), 
-                                                          OFFSET_PROCESS_EVENT, 
-                                                          reinterpret_cast<void*>(hooked_ProcessEvent), 
-                                                          reinterpret_cast<void**>(&orig_ProcessEvent));
+                // Shadow VTable Swap directamente en PlayerController (Heap Cloning)
+                hookApplied = ApplyShadowVTableHook(reinterpret_cast<void*>(playerController), 
+                                                    OFFSET_PROCESS_EVENT, 
+                                                    reinterpret_cast<void*>(hooked_ProcessEvent), 
+                                                    reinterpret_cast<void**>(&orig_ProcessEvent));
                                               
                 if (hookApplied) {
-                    printf("[LOG] VTable Swap aplicado con éxito en el PlayerController!\n");
+                    printf("[LOG] Shadow VTable Hook aplicado con éxito en el PlayerController!\n");
                 }
             }
         }
