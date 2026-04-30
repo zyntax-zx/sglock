@@ -34,13 +34,13 @@ static float NormAxis(float a) {
 }
 
 // ============================================================================
-// [2. TRUTH TABLE v4.4 — FULL GWORLD NAVIGATION]
+// [2. TRUTH TABLE v4.5 — INVOCACIÓN NATIVA DINÁMICA]
 // ============================================================================
 
-constexpr uintptr_t ADDR_GWORLD           = 0x951770; // Offset maestro GWorld
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; 
+// Función de resolución dinámica
+constexpr uintptr_t OFF_GET_WORLD         = 0xaf18;   // GetFullWorld()
 
-// Funciones nativas
+// Funciones nativas de combate
 constexpr uintptr_t OFF_GET_WEAPON_ID     = 0x4c546c;
 constexpr uintptr_t OFF_PICK_TARGET       = 0x0b27f0;
 constexpr uintptr_t OFF_K2_ACTOR_LOC      = 0x1b844c;
@@ -74,6 +74,7 @@ static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
 static bool g_Active    = false;
 static int  g_LogTick   = 0; 
 
+static uintptr_t (*GetFullWorld)(void);
 static int       (*GetWeaponID)(void*);
 static uintptr_t (*PickTarget)(void*, void*, double);
 static FVector   (*K2_GetActorLocation)(uintptr_t);
@@ -81,23 +82,25 @@ static void      (*AddYaw)(void*, float);
 static void      (*AddPitch)(void*, float);
 
 // ============================================================================
-// [4. LÓGICA DE COMBATE (GWorld Navigation Step-by-Step)]
+// [4. LÓGICA DE COMBATE (Dynamic World Invocation)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
     if (!g_Active) return;
 
-    // ── Paso 1: GWorld (Base + 0x951770) ─────────────────────────────────────
-    uintptr_t wAddr = OFF(ADDR_GWORLD);
-    if (!IS_SAFE_PTR(wAddr)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: ADDR_GWORLD invalido."); return; }
-    uintptr_t world = *reinterpret_cast<uintptr_t*>(wAddr);
-    if (!IS_SAFE_PTR(world)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: GWorld nulo."); return; }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld: 0x%lX", world);
+    // ── Paso 1: Obtener Mundo Vía Función Nativa (0xAF18) ───────────────────
+    if (!GetFullWorld) return;
+    uintptr_t world = GetFullWorld();
+    
+    if (!IS_SAFE_PTR(world)) {
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] Esperando inicializacion del Mundo...");
+        return;
+    }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld resuelto dinamicamente: 0x%lX", world);
 
     // ── Paso 2: GameInstance (+0x180) ────────────────────────────────────────
     uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
     if (!IS_SAFE_PTR(gi)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: GameInstance nulo."); return; }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] GameInstance: 0x%lX", gi);
 
     // ── Paso 3: LocalPlayers (+0x38) ─────────────────────────────────────────
     uintptr_t lpArr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
@@ -126,7 +129,6 @@ static void AimlockTick(bool doLog) {
         if (doLog) NSLog(@"[SGLOCK_DEBUG] Sin objetivos en FOV.");
         return;
     }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] Enemigo: 0x%lX", enemy);
 
     // ── Paso 8: Cálculo y Ejecución ──────────────────────────────────────────
     int hp = *reinterpret_cast<int*>(enemy + OFF_HEALTH_STATE);
@@ -231,12 +233,14 @@ static void InjectUI() {
 // ============================================================================
 
 static void StartupThread() {
-    NSLog(@"[SGLOCK_DEBUG] DYLIB CARGADO. Bundle: %@", [[NSBundle mainBundle] bundleIdentifier]);
-    NSLog(@"[SGLOCK_DEBUG] Base Address: 0x%llX", (unsigned long long)BASE());
+    NSLog(@"[SGLOCK_DEBUG] DYLIB CARGADO. Base: 0x%llX", (unsigned long long)BASE());
 
-    (void)ADDR_GOBJECTS;
     std::this_thread::sleep_for(std::chrono::seconds(10));
 
+    // Resolución de Invocación Nativa
+    GetFullWorld        = reinterpret_cast<uintptr_t(*)(void)>            (OFF(OFF_GET_WORLD));
+    
+    // Resolución de Funciones de Combate
     GetWeaponID         = reinterpret_cast<int(*)(void*)>                 (OFF(OFF_GET_WEAPON_ID));
     PickTarget          = reinterpret_cast<uintptr_t(*)(void*,void*,double)>(OFF(OFF_PICK_TARGET));
     K2_GetActorLocation = reinterpret_cast<FVector(*)(uintptr_t)>          (OFF(OFF_K2_ACTOR_LOC));
