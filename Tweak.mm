@@ -1,3 +1,4 @@
+#import <UIKit/UIKit.h>
 #include <mach-o/dyld.h>
 #include <stdint.h>
 #include <cmath>
@@ -28,7 +29,7 @@ struct FRotator {
 // [2. OFFSETS NATIVOS FINALIZADOS (Direcciones Base 0)]
 // ============================================================================
 
-constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788;
+constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788; 
 constexpr uintptr_t OFFSET_WEAPON_ID_FUNC     = 0x4c546c;
 constexpr uintptr_t OFFSET_TARGET_SELECTOR    = 0x91e8;
 constexpr uintptr_t OFFSET_ACTOR_LOCATION     = 0x1b844c;
@@ -39,39 +40,97 @@ constexpr uintptr_t OFFSET_ADD_YAW_INPUT      = 0x1e3294;
 constexpr uintptr_t OFFSET_ADD_PITCH_INPUT    = 0x1e33dc;
 
 // Memoria Dinámica
-constexpr uintptr_t ADDRESS_SHOTGUN_TOGGLE    = 0x9516b2; // bool
 constexpr uintptr_t ADDRESS_ROTATION_OFFSET   = 0x951658; // uint32_t
 constexpr uintptr_t ADDRESS_STRING_DRAW_HUD   = 0x0090cb2a; // char*
+// NOTA: ADDRESS_SHOTGUN_TOGGLE fue eliminado. Ahora se usa Master Switch UI.
 
 // Constantes de Instancia y Motor
-constexpr uintptr_t OFFSET_PROCESS_EVENT      = 0x260;    // VTable Offset en bytes
+constexpr uintptr_t OFFSET_PROCESS_EVENT      = 0x260;    
 constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x30;
-constexpr uintptr_t OFFSET_HUD                = 0x2b0;    // Offset jerárquico del HUD
+constexpr uintptr_t OFFSET_HUD                = 0x2b0;    
 constexpr uintptr_t OFFSET_HEALTH_STATE       = 0x67c;
 constexpr int       STATE_KNOCKED             = 0x92f92;
 
-// ============================================================================
-// [3. VARIABLES GLOBALES DE ESTADO Y CONTROL]
-// ============================================================================
-
-// [REQUISITO] Estado Inicial Desactivado para Safe Start
-bool g_SGLock_Active = false;
-
-extern "C" __attribute__((visibility("default"))) void set_sglock_enabled(bool state) { g_SGLock_Active = state; }
-extern "C" __attribute__((visibility("default"))) bool get_sglock_enabled() { return g_SGLock_Active; }
-
-/**
- * @brief Manejo seguro de ASLR para Base 0 en iOS.
- * Dado que los offsets de Ghidra fueron exportados con Base 0, 
- * la suma directa con el mach_header es el método nativo exacto. 
- * Equivalente a: _dyld_get_image_vmaddr_slide(0) + 0x100000000 + offset
- */
 inline uintptr_t getRealOffset(uintptr_t offset) {
     return reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)) + offset;
 }
 
 // ============================================================================
-// [4. FIRMAS DE FUNCIONES NATIVAS]
+// [3. VARIABLES GLOBALES DE ESTADO Y CONTROL]
+// ============================================================================
+
+bool g_SGLock_Active = false;
+
+// ============================================================================
+// [4. INTERFAZ GRÁFICA NATIVA (UI Master Switch)]
+// ============================================================================
+
+@interface SGLockButton : UIButton
+@end
+
+@implementation SGLockButton
+
+- (void)toggleState {
+    g_SGLock_Active = !g_SGLock_Active;
+    
+    // Feedback háptico nativo
+    UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [generator prepare];
+    [generator impactOccurred];
+    
+    // Cambio de estado visual
+    if (g_SGLock_Active) {
+        self.backgroundColor = [UIColor greenColor];
+    } else {
+        self.backgroundColor = [UIColor redColor];
+    }
+    
+    printf("[Tweak] SGLock is now %s\n", g_SGLock_Active ? "ENABLED" : "DISABLED");
+}
+
+- (void)dragged:(UIPanGestureRecognizer *)pan {
+    if (pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint translation = [pan translationInView:self.superview];
+        self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+        [pan setTranslation:CGPointZero inView:self.superview];
+    }
+}
+@end
+
+void InjectMasterSwitchUI() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *mainWindow = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (w.isKeyWindow) {
+                mainWindow = w;
+                break;
+            }
+        }
+        
+        if (!mainWindow) return;
+        
+        SGLockButton *btn = [SGLockButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(20, 100, 40, 40); // Pequeño y en la esquina
+        btn.layer.cornerRadius = 20; // Circular
+        btn.backgroundColor = [UIColor redColor]; // Estado Inicial Desactivado
+        btn.layer.borderWidth = 2;
+        btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        btn.clipsToBounds = YES;
+        btn.alpha = 0.85; // Semi-transparente
+        
+        // Tap para Activar/Desactivar
+        [btn addTarget:btn action:@selector(toggleState) forControlEvents:UIControlEventTouchUpInside];
+        
+        // Gesto para arrastrar libremente
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:btn action:@selector(dragged:)];
+        [btn addGestureRecognizer:pan];
+        
+        [mainWindow addSubview:btn];
+    });
+}
+
+// ============================================================================
+// [5. FIRMAS DE FUNCIONES NATIVAS]
 // ============================================================================
 
 int (*GetWeaponID)(void*);
@@ -82,7 +141,7 @@ void (*AddControllerYawInput)(void*, float);
 void (*AddControllerPitchInput)(void*, float);
 
 // ============================================================================
-// [5. VTABLE HOOK ENGINE (JAILED SAFE)]
+// [6. VTABLE HOOK ENGINE (JAILED SAFE)]
 // ============================================================================
 
 bool ApplyVTableHookByByteOffset(void* instance, size_t byteOffset, void* hookedFunc, void** origFuncOut) {
@@ -91,7 +150,6 @@ bool ApplyVTableHookByByteOffset(void* instance, size_t byteOffset, void* hooked
     uintptr_t* vtable = *reinterpret_cast<uintptr_t**>(instance);
     if (!vtable) return false;
 
-    // Convertir offset en bytes a índice del array (arquitectura 64-bit)
     int vtableIndex = byteOffset / sizeof(uintptr_t);
 
     if (origFuncOut) {
@@ -110,7 +168,7 @@ bool ApplyVTableHookByByteOffset(void* instance, size_t byteOffset, void* hooked
 }
 
 // ============================================================================
-// [6. INTERCEPCIÓN DEL PROCESSEVENT (NÚCLEO DEL AIMLOCK PERSISTENTE)]
+// [7. INTERCEPCIÓN DEL PROCESSEVENT (NÚCLEO DEL AIMLOCK PERSISTENTE)]
 // ============================================================================
 
 void (*orig_ProcessEvent)(void* _this, void* function, void* parms, void* hud);
@@ -122,34 +180,19 @@ float NormalizeAxis(float angle) {
 }
 
 void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
-    // 1. Validación contra punteros nulos para evadir EXC_BAD_ACCESS del motor
-    if (!_this || !function || !hud) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
-        return;
-    }
-
-    // 2. Activación Manual / Dinámica (El Disparador)
-    // Leemos el valor del juego. Solo activamos si el juego lo permite y si el jugador
-    // ya está en un estado válido (no en el menú principal).
-    uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-    if (localPlayerBase) {
-        uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
-        if (localPlayer != 0) { // Safe Start Check
-            bool gameToggle = *reinterpret_cast<bool*>(getRealOffset(ADDRESS_SHOTGUN_TOGGLE));
-            if (gameToggle != g_SGLock_Active) {
-                g_SGLock_Active = gameToggle;
-                printf("[Tweak] SGLock is now %s\n", g_SGLock_Active ? "ENABLED" : "DISABLED");
-            }
-        }
-    }
-
-    // 3. Estado Inicial Desactivado / Regla de Oro
+    // 1. Regla de Oro: Retorno ultra-rápido si está desactivado por el UI Switch
     if (!g_SGLock_Active) {
         if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
         return;
     }
 
-    // 4. Resolución de Evento (HUD) - _memcmp dinámico nativo
+    // 2. Validación estricta contra punteros nulos para evadir EXC_BAD_ACCESS
+    if (!_this || !function || !hud) {
+        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
+        return;
+    }
+
+    // 3. Resolución de Evento (HUD) - _memcmp nativo
     char* targetEventString = reinterpret_cast<char*>(getRealOffset(ADDRESS_STRING_DRAW_HUD));
     bool isDrawHUD = false;
     
@@ -160,18 +203,20 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
     }
 
     if (isDrawHUD) {
-        // 5. Validación de Estructuras (PlayerController vía param_4)
+        // Validación de PlayerController vía param_4
         uintptr_t playerController = *reinterpret_cast<uintptr_t*>((uintptr_t)hud + OFFSET_PLAYER_CONTROLLER);
         if (playerController) {
             
+            uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
             if (localPlayerBase) {
                 uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
 
-                if (localPlayer) {
-                    // 4. Obtener ID del Arma (WeaponID)
+                // Anti-Crash: Validación estricta, no ejecutar si el jugador no ha cargado en el mapa
+                if (localPlayer != 0) {
+                    
                     int currentWeaponID = GetWeaponID(reinterpret_cast<void*>(localPlayer));
                     
-                    // 5. Filtro de Arma (Escopetas)
+                    // Filtro Exacto de Escopeta
                     if (((currentWeaponID - 0x19641) < 4) || (currentWeaponID == 0x196a5)) {
                         
                         uint8_t p1[16] = {0};
@@ -179,26 +224,22 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
                         uintptr_t closestEnemy = GetTargetForAimBotByFOV(p1, p2, 0.0);
 
                         if (closestEnemy) {
-                            // Filtro de Salud Prioritario (Noqueados)
                             int healthState = *reinterpret_cast<int*>(closestEnemy + OFFSET_HEALTH_STATE);
                             if (healthState != STATE_KNOCKED) {
                                 
-                                // 6. Cálculo Direccional Vectorial
                                 FVector localPos = K2_GetActorLocation(localPlayer);
                                 FVector enemyPos = K2_GetActorLocation(closestEnemy);
                                 FVector VectorDir = enemyPos - localPos;
                                 
                                 FRotator targetRotation = Conv_VectorToRotator(VectorDir);
                                 
-                                // 7. Lectura del Offset de Rotación Dinámico
                                 uint32_t dynamicRotOffset = *reinterpret_cast<uint32_t*>(getRealOffset(ADDRESS_ROTATION_OFFSET));
                                 FRotator currentRotation = *reinterpret_cast<FRotator*>(playerController + dynamicRotOffset);
                                 
-                                // Cálculo de Delta Normalizado
                                 float deltaYaw = NormalizeAxis(targetRotation.Yaw - currentRotation.Yaw);
                                 float deltaPitch = NormalizeAxis(targetRotation.Pitch - currentRotation.Pitch);
                                 
-                                // 8. Sistema de Apuntado (Input Nativo Seguro)
+                                // Input Nativo Suavizado
                                 float smoothing = 0.5f; 
                                 if (AddControllerYawInput && AddControllerPitchInput) {
                                     AddControllerYawInput(reinterpret_cast<void*>(playerController), deltaYaw * smoothing);
@@ -212,20 +253,18 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
         }
     }
 
-    // Retorno al flujo nativo
     if (orig_ProcessEvent) {
         orig_ProcessEvent(_this, function, parms, hud);
     }
 }
 
 // ============================================================================
-// [7. INICIALIZACIÓN E INYECCIÓN]
+// [8. INICIALIZACIÓN E INYECCIÓN]
 // ============================================================================
 
 void BackgroundInjectionThread() {
     printf("[LOG] Base Address encontrada: 0x%lX\n", reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)));
     
-    // Asignación estricta de funciones externas
     GetWeaponID = reinterpret_cast<int (*)(void*)>(getRealOffset(OFFSET_WEAPON_ID_FUNC));
     GetTargetForAimBotByFOV = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(OFFSET_TARGET_SELECTOR));
     Conv_VectorToRotator = reinterpret_cast<FRotator (*)(FVector)>(getRealOffset(OFFSET_VECTOR_TO_ROTATOR));
@@ -234,9 +273,12 @@ void BackgroundInjectionThread() {
     AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
     AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
 
+    // Inyectar Master Switch a la Interfaz del Motor
+    InjectMasterSwitchUI();
+
     bool hookApplied = false;
 
-    // Bucle de inicialización asíncrono
+    // Bucle de espera pasiva hasta encontrar la instancia de HUD
     while (!hookApplied) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -245,14 +287,12 @@ void BackgroundInjectionThread() {
         
         uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
         if (localPlayer) {
-            printf("[LOG] LocalPlayer instanciado en memoria.\n");
             
             uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
             if (playerController) {
                 uintptr_t hudInstance = *reinterpret_cast<uintptr_t*>(playerController + OFFSET_HUD); 
                 if (hudInstance) {
                     
-                    // Inyección a través de VTable Byte Offset
                     hookApplied = ApplyVTableHookByByteOffset(reinterpret_cast<void*>(hudInstance), 
                                                               OFFSET_PROCESS_EVENT, 
                                                               reinterpret_cast<void*>(hooked_ProcessEvent), 
