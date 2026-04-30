@@ -1,0 +1,31 @@
+name: Compile Theos Tweak
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Theos
+      uses: theos/theos-action@v1
+
+    - name: Build Tweak
+      run: |
+        make package FINALPACKAGE=1
+
+    - name: Upload Dylib / Deb Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sglock-package
+        path: packages/*.deb

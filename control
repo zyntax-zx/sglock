@@ -1,0 +1,9 @@
+Package: com.antigravity.sglock
+Name: Shotgun Lock
+Depends: mobilesubstrate
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Silent Aim exclusivly for Shotguns in UE Games.
+Maintainer: Antigravity
+Author: Antigravity
+Section: Tweaks
