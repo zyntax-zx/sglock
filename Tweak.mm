@@ -53,7 +53,7 @@ constexpr uintptr_t OFFSET_ADD_PITCH_INPUT   = 0x1e33dc;
 constexpr uintptr_t OFFSET_PICK_TARGET       = 0x0b27f0;
 constexpr uintptr_t ADDRESS_STRING_DRAW_HUD  = 0x90cb2a;
 constexpr uintptr_t OFFSET_HEALTH_STATE      = 0x67c;
-constexpr uintptr_t OFFSET_PLAYER_CONTROLLER = 0x548;
+
 constexpr uintptr_t OFFSET_CONTROL_ROTATION  = 0x2e8;
 
 constexpr int       STATE_KNOCKED            = 0x92f92;
