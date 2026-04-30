@@ -39,8 +39,6 @@ constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico Rotaci
 constexpr uintptr_t TOGGLE_SHORTGUN       = 0x9516b2; // bool _ShortGunWP (Nota: con R)
 
 // Offsets de Estructura Interna (Pure Read)
-constexpr uintptr_t OFF_Obj_Class         = 0x10;
-constexpr uintptr_t OFF_Obj_Name          = 0x18;
 constexpr uintptr_t OFF_Player_Player     = 0x30;   // APlayerController -> UPlayer*
 constexpr uintptr_t OFF_Pawn              = 0x3d0;  // APlayerController -> APawn
 constexpr uintptr_t OFF_RootComp          = 0x130;  // AActor -> RootComponent
