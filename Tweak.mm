@@ -69,7 +69,8 @@ static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
 // [3. ESTADO GLOBAL]
 // ============================================================================
 
-static bool g_Active = false;
+static bool g_Active    = false;
+static int  g_LogTick   = 0; // Reduce frecuencia de logs (1 log/seg a 60fps)
 
 static int       (*GetWeaponID)(void*);
 static uintptr_t (*PickTarget)(void*, void*, double);
@@ -84,55 +85,93 @@ static void      (*AddPitch)(void*, float);
 static void AimlockTick() {
     if (!g_Active) return;
 
-    // Ancla de LocalPlayer — validación rápida antes de navegar GWorld
-    uintptr_t lpAddr = OFF(ADDR_LOCAL_PLAYER_PTR);
-    if (!IS_SAFE_PTR(lpAddr)) return;
-    uintptr_t lpAnchor = *reinterpret_cast<uintptr_t*>(lpAddr);
-    if (!IS_SAFE_PTR(lpAnchor)) return;
+    // Throttle de logs: imprimir 1 vez por segundo (~60 frames)
+    bool doLog = (++g_LogTick >= 60);
+    if (doLog) g_LogTick = 0;
 
-    // GWorld → GameInstance → LocalPlayers → LocalPlayer → PlayerController
+    // ── Ancla LocalPlayer ────────────────────────────────────────────────────
+    uintptr_t lpAddr = OFF(ADDR_LOCAL_PLAYER_PTR);
+    if (!IS_SAFE_PTR(lpAddr)) {
+        if (doLog) printf("[DEBUG] FAIL: Direccion LocalPlayer invalida.\n");
+        return;
+    }
+    uintptr_t lpAnchor = *reinterpret_cast<uintptr_t*>(lpAddr);
+    if (!IS_SAFE_PTR(lpAnchor)) {
+        if (doLog) printf("[DEBUG] FAIL: LocalPlayer es nulo (en menu o cargando).\n");
+        return;
+    }
+    if (doLog) printf("[DEBUG] LocalPlayer OK: 0x%lX\n", lpAnchor);
+
+    // ── GWorld → GameInstance → LocalPlayers ────────────────────────────────
     uintptr_t wAddr = OFF(ADDR_GWORLD);
-    if (!IS_SAFE_PTR(wAddr)) return;
+    if (!IS_SAFE_PTR(wAddr)) { if (doLog) printf("[DEBUG] FAIL: ADDR_GWORLD invalido.\n"); return; }
     uintptr_t world = *reinterpret_cast<uintptr_t*>(wAddr);
-    if (!IS_SAFE_PTR(world)) return;
+    if (!IS_SAFE_PTR(world)) { if (doLog) printf("[DEBUG] FAIL: GWorld* nulo.\n"); return; }
+    if (doLog) printf("[DEBUG] GWorld OK: 0x%lX\n", world);
 
     uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
-    if (!IS_SAFE_PTR(gi)) return;
+    if (!IS_SAFE_PTR(gi)) { if (doLog) printf("[DEBUG] FAIL: GameInstance nulo.\n"); return; }
 
     uintptr_t lpArr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
-    if (!IS_SAFE_PTR(lpArr)) return;
+    if (!IS_SAFE_PTR(lpArr)) { if (doLog) printf("[DEBUG] FAIL: LocalPlayers[] nulo.\n"); return; }
 
     uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpArr);
-    if (!IS_SAFE_PTR(lp)) return;
+    if (!IS_SAFE_PTR(lp)) { if (doLog) printf("[DEBUG] FAIL: LocalPlayer[0] nulo.\n"); return; }
 
+    // ── PlayerController (lp + 0x30) ─────────────────────────────────────────
     uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lp + OFF_PLAYER_CTRL);
-    if (!IS_SAFE_PTR(ctrl)) return;
+    if (!IS_SAFE_PTR(ctrl)) { if (doLog) printf("[DEBUG] FAIL: PlayerController nulo (lp+0x%lX).\n", OFF_PLAYER_CTRL); return; }
+    if (doLog) printf("[DEBUG] PlayerController OK: 0x%lX\n", ctrl);
 
-    // Filtro de Arma
+    // ── Filtro de Arma ───────────────────────────────────────────────────────
     int wid = GetWeaponID(reinterpret_cast<void*>(lp));
     bool isShotgun = (((wid - 0x19641) < 4) || (wid == 0x196a5));
+    if (doLog) printf("[DEBUG] WeaponID detectado: 0x%X | isShotgun: %s\n",
+                      (unsigned)wid, isShotgun ? "SI" : "NO");
     if (!isShotgun) return;
 
-    // Buscar Objetivo
+    // ── Buscar Objetivo (FOV=90) ─────────────────────────────────────────────
     uint8_t p1[16] = {}, p2[16] = {};
-    uintptr_t enemy = PickTarget(p1, p2, 0.0);
-    if (!IS_SAFE_PTR(enemy)) return;
+    uintptr_t enemy = PickTarget(p1, p2, 90.0); // FOV forzado a 90 grados
+    if (!IS_SAFE_PTR(enemy)) {
+        if (doLog) printf("[DEBUG] Sin objetivos en FOV 90.\n");
+        return;
+    }
+    if (doLog) printf("[DEBUG] Objetivo encontrado en: 0x%lX\n", enemy);
 
+    // ── Filtro de Estado ─────────────────────────────────────────────────────
     int hp = *reinterpret_cast<int*>(enemy + OFF_HEALTH_STATE);
-    if (hp == STATE_KNOCKED) return;
+    if (hp == STATE_KNOCKED) {
+        if (doLog) printf("[DEBUG] Objetivo noqueado (hp=0x%X), saltando.\n", (unsigned)hp);
+        return;
+    }
 
-    // Cálculo de Rotación
+    // ── Calculo de Rotacion ──────────────────────────────────────────────────
     FVector myPos = K2_GetActorLocation(lp);
     FVector enPos = K2_GetActorLocation(enemy);
-    FRotator tgt  = VecToRot(enPos - myPos);
+    FVector dir   = enPos - myPos;
+    FRotator tgt  = VecToRot(dir);
     FRotator cur  = *reinterpret_cast<FRotator*>(ctrl + OFF_CTRL_ROTATION);
 
     float dY = NormAxis(tgt.Yaw   - cur.Yaw);
     float dP = NormAxis(tgt.Pitch - cur.Pitch);
 
+    if (doLog) printf("[DEBUG] Dir=(%.1f,%.1f,%.1f) tgt=(P:%.1f Y:%.1f) cur=(P:%.1f Y:%.1f) delta=(P:%.2f Y:%.2f)\n",
+                      dir.X, dir.Y, dir.Z,
+                      tgt.Pitch, tgt.Yaw,
+                      cur.Pitch, cur.Yaw,
+                      dP, dY);
+
+    // ── Input Nativo (SMOOTH x2 para prueba de movimiento visible) ───────────
+    // AddYaw/AddPitch se llaman sobre 'ctrl' (PlayerController) — NO sobre 'lp'
+    constexpr float TEST_SMOOTH = SMOOTH * 2.0f; // Factor duplicado para test
     if (AddYaw && AddPitch) {
-        AddYaw  (reinterpret_cast<void*>(ctrl), dY * SMOOTH);
-        AddPitch(reinterpret_cast<void*>(ctrl), dP * SMOOTH);
+        AddYaw  (reinterpret_cast<void*>(ctrl), dY * TEST_SMOOTH);
+        AddPitch(reinterpret_cast<void*>(ctrl), dP * TEST_SMOOTH);
+        if (doLog) printf("[DEBUG] AddInput aplicado -> Yaw=%.3f Pitch=%.3f (ctrl: 0x%lX)\n",
+                          dY * TEST_SMOOTH, dP * TEST_SMOOTH, ctrl);
+    } else {
+        if (doLog) printf("[DEBUG] FAIL: AddYaw o AddPitch son nulos.\n");
     }
 }
 
