@@ -182,10 +182,10 @@ static void init_tweak() {
         uintptr_t onPelletsAddr = getRealOffset(HOOK_ON_PELLETS);
 
         if (onPelletsAddr) {
-            // Implementar el hook con Dobby (DobbyHook)
-            DobbyHook(reinterpret_cast<void*>(onPelletsAddr), 
-                      reinterpret_cast<void*>(hooked_OnPelletsOnShotChanged), 
-                      reinterpret_cast<void**>(&orig_OnPelletsOnShotChanged));
+            // PRUEBA DE AISLAMIENTO: Comentamos el hook temporalmente.
+            // DobbyHook(reinterpret_cast<void*>(onPelletsAddr), 
+            //           reinterpret_cast<void*>(hooked_OnPelletsOnShotChanged), 
+            //           reinterpret_cast<void**>(&orig_OnPelletsOnShotChanged));
             
             printf("[SGLOCK] Inicializado correctamente tras 5s. Hook activo en: 0x%lX\n", onPelletsAddr);
         }
