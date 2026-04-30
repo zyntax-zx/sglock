@@ -150,9 +150,10 @@ void (*AddControllerPitchInput)(void*, float);
 // ============================================================================
 
 #ifdef __arm64e__
-#define STRIP_PAC(x) ((uintptr_t)(x) & 0x0000000fffffffffULL)
+// PAC detection log, PAC stripping disabled temporalily for emergency testing
+#define ARM64E_LOG() printf("[LOG] Dispositivo ARM64e detectado. PAC en observacion.\n")
 #else
-#define STRIP_PAC(x) ((uintptr_t)(x))
+#define ARM64E_LOG()
 #endif
 
 bool ApplyShadowVTableHook(void* instance, size_t byteOffset, void* hookedFunc, void** origFuncOut) {
@@ -170,14 +171,14 @@ bool ApplyShadowVTableHook(void* instance, size_t byteOffset, void* hookedFunc, 
     int vtableIndex = byteOffset / sizeof(uintptr_t);
 
     if (origFuncOut) {
-        // Almacenamos el puntero original eliminando la firma PAC si estamos en arm64e
-        *origFuncOut = reinterpret_cast<void*>(STRIP_PAC(originalVTable[vtableIndex]));
+        // Obtenemos el puntero raw (Sin PAC stripping temporalmente para diagnóstico)
+        *origFuncOut = reinterpret_cast<void*>(originalVTable[vtableIndex]);
     }
 
     // Reemplazamos la función deseada en nuestra copia plana
     shadowVTable[vtableIndex] = reinterpret_cast<uintptr_t>(hookedFunc);
     
-    // Instance Swap: Apuntamos el objeto a nuestra nueva VTable modificada
+    // Instance Swap: Reemplazamos el puntero de la VTable del objeto (offset 0x0)
     *reinterpret_cast<uintptr_t**>(instance) = shadowVTable;
 
     return true;
@@ -187,9 +188,9 @@ bool ApplyShadowVTableHook(void* instance, size_t byteOffset, void* hookedFunc, 
 // [7. INTERCEPCIÓN DEL PROCESSEVENT (NÚCLEO DEL AIMLOCK PERSISTENTE)]
 // ============================================================================
 
-void (*orig_ProcessEvent)(void* _this, void* function, void* parms);
+void (*orig_ProcessEvent)(uintptr_t _this, uintptr_t function, void* parms);
 
-void hooked_ProcessEvent(void* _this, void* function, void* parms) {
+void hooked_ProcessEvent(uintptr_t _this, uintptr_t function, void* parms) {
     // 1. Master Switch 
     if (!g_SGLock_Active) {
         if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
@@ -207,7 +208,7 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms) {
     bool isDrawHUD = false;
     
     if (IS_VALID_PTR(targetEventString)) {
-        if (memcmp(function, targetEventString, 34) == 0) {
+        if (memcmp(reinterpret_cast<void*>(function), targetEventString, 34) == 0) {
             isDrawHUD = true;
         }
     }
@@ -277,9 +278,17 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms) {
 
 void BackgroundInjectionThread() {
     printf("[LOG] Base Address encontrada: 0x%lX\n", reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)));
+    ARM64E_LOG();
     
-    // DELAY ABSOLUTO DE 15 SEGUNDOS
-    std::this_thread::sleep_for(std::chrono::seconds(15));
+    // 1. DELAY INICIAL DE UI (10 Segundos) - Prueba de Aislamiento
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    
+    // UI: Botón flotante siempre en main_queue (Crashea aquí = Culpa de UIKit)
+    InjectMasterSwitchUI();
+    printf("[LOG] Interfaz Master Switch Inyectada.\n");
+
+    // 2. DELAY DE HOOK (5 Segundos adicionales)
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     
     GetWeaponID = reinterpret_cast<int (*)(void*)>(getRealOffset(OFFSET_GET_WEAPON_ID));
     PickTarget = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(OFFSET_PICK_TARGET));
@@ -287,10 +296,6 @@ void BackgroundInjectionThread() {
     
     AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
     AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
-
-    // UI: Botón flotante SIEMPRE tras 15 segundos
-    InjectMasterSwitchUI();
-    printf("[LOG] Interfaz Master Switch Inyectada.\n");
 
     bool hookApplied = false;
 
