@@ -24,8 +24,8 @@ jobs:
       run: |
         make package FINALPACKAGE=1
 
-    - name: Upload Dylib / Deb Artifact
+    - name: Upload Dylib Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: sglock-package
-        path: packages/*.deb
+        name: sglock-dylib
+        path: .theos/obj/**/sglock.dylib

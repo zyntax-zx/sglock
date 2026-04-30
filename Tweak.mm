@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <cmath>
 #include <cstdio>
+#include <thread>
+#include <chrono>
 
 // Dependencia de hooking (Dobby). Asegúrate de tener Dobby.h en tu entorno Theos ($THEOS/include).
 #include <dobby.h>
@@ -160,27 +162,32 @@ void hooked_OnPelletsOnShotChanged(void* _this) {
  */
 __attribute__((constructor))
 static void init_tweak() {
-    // Verificación básica para asegurar que el binario principal esté cargado
-    if (!_dyld_get_image_header(0)) {
-        return;
-    }
+    // Para evitar crasheos al inyectar el Dylib (Sideloading), retrasamos la inicialización 5 segundos.
+    // Esto da tiempo a que el motor (Unreal Engine) y el binario principal se descompriman y carguen.
+    std::thread([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    // Inicialización de las funciones externas extraídas de Ghidra sumando el ASLR
-    GetWeaponID = reinterpret_cast<int (*)(void*)>(getRealOffset(0x4b2a30));
-    GetTargetForAimBotByFOV = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(0x91e8));
-    Conv_VectorToRotator = reinterpret_cast<FRotator (*)(FVector)>(getRealOffset(0xcf570));
-    K2_GetActorLocation = reinterpret_cast<FVector (*)(uintptr_t)>(getRealOffset(0x1b844c));
+        // Verificación básica para asegurar que el binario principal esté cargado
+        if (!_dyld_get_image_header(0)) {
+            return;
+        }
 
-    // Calcular dirección real del hook con el bypass de ASLR
-    uintptr_t onPelletsAddr = getRealOffset(HOOK_ON_PELLETS);
+        // Inicialización de las funciones externas extraídas de Ghidra sumando el ASLR
+        GetWeaponID = reinterpret_cast<int (*)(void*)>(getRealOffset(0x4b2a30));
+        GetTargetForAimBotByFOV = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(0x91e8));
+        Conv_VectorToRotator = reinterpret_cast<FRotator (*)(FVector)>(getRealOffset(0xcf570));
+        K2_GetActorLocation = reinterpret_cast<FVector (*)(uintptr_t)>(getRealOffset(0x1b844c));
 
-    if (onPelletsAddr) {
-        // Implementar el hook con Dobby (DobbyHook)
-        // Firma: (void*)Dirección_Real, (void*)Dirección_Hook, (void**)&Función_Original
-        DobbyHook(reinterpret_cast<void*>(onPelletsAddr), 
-                  reinterpret_cast<void*>(hooked_OnPelletsOnShotChanged), 
-                  reinterpret_cast<void**>(&orig_OnPelletsOnShotChanged));
-        
-        printf("[SGLOCK] Inicializado correctamente. Hook activo en: 0x%lX\n", onPelletsAddr);
-    }
+        // Calcular dirección real del hook con el bypass de ASLR
+        uintptr_t onPelletsAddr = getRealOffset(HOOK_ON_PELLETS);
+
+        if (onPelletsAddr) {
+            // Implementar el hook con Dobby (DobbyHook)
+            DobbyHook(reinterpret_cast<void*>(onPelletsAddr), 
+                      reinterpret_cast<void*>(hooked_OnPelletsOnShotChanged), 
+                      reinterpret_cast<void**>(&orig_OnPelletsOnShotChanged));
+            
+            printf("[SGLOCK] Inicializado correctamente tras 5s. Hook activo en: 0x%lX\n", onPelletsAddr);
+        }
+    }).detach();
 }
