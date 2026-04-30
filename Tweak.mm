@@ -141,8 +141,8 @@ void hooked_OnPelletsOnShotChanged(void* _this) {
         // Pasar VectorDir a la función Conv_VectorToRotator
         FRotator targetRotation = Conv_VectorToRotator(VectorDir);
 
-        // Aplicar esa rotación al PlayerController en el offset 0x548
-        *reinterpret_cast<FRotator*>(localPlayer + 0x548) = targetRotation;
+        // Aplicar esa rotación al PlayerController en el offset declarado
+        *reinterpret_cast<FRotator*>(localPlayer + OFFSET_PLAYER_CONTROLLER) = targetRotation;
         
         printf("[SGLOCK] Aimlock aplicado al objetivo %p con éxito.\n", (void*)closestEnemy);
     }
