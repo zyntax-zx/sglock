@@ -6,6 +6,7 @@
 #include <chrono>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cstring>
 #include <string>
 
 // ============================================================================
@@ -24,30 +25,28 @@ struct FRotator {
 };
 
 // ============================================================================
-// [2. OFFSETS ACTUALIZADOS (v1.5.0 - Persistent ProcessEvent)]
+// [2. OFFSETS ACTUALIZADOS (v2.1 - Persistent ProcessEvent & Dynamic Values)]
 // ============================================================================
 
-constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788; // Nuevo offset base del LocalPlayer
-constexpr uintptr_t OFFSET_WEAPON_ID_FUNC     = 0x4c546c; // Nuevo offset GetWeaponID
+constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788; // Dirección base del LocalPlayer
+constexpr uintptr_t OFFSET_WEAPON_ID_FUNC     = 0x4c546c; // GetWeaponID
 constexpr uintptr_t OFFSET_TARGET_SELECTOR    = 0x91e8;
 constexpr uintptr_t OFFSET_ACTOR_LOCATION     = 0x1b844c;
 constexpr uintptr_t OFFSET_VECTOR_TO_ROTATOR  = 0xcf570;
 
-// Offsets dependientes del volcado (A modificar con Ghidra/IDA):
-constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x30;     // Offset de PlayerController dentro de LocalPlayer
-constexpr uintptr_t OFFSET_CONTROL_ROTATION   = 0x2e8;    // Offset de ControlRotation en PlayerController
-constexpr uintptr_t OFFSET_HUD                = 0x2B0;    // Offset de MyHUD dentro de PlayerController
-constexpr uintptr_t OFFSET_ADD_YAW_INPUT      = 0x000000; // TODO: Reemplazar con el offset real de AddControllerYawInput
-constexpr uintptr_t OFFSET_ADD_PITCH_INPUT    = 0x000000; // TODO: Reemplazar con el offset real de AddControllerPitchInput
+// Offsets de Movimiento de Cámara Nativo (Input):
+constexpr uintptr_t OFFSET_ADD_YAW_INPUT      = 0x1e3294;
+constexpr uintptr_t OFFSET_ADD_PITCH_INPUT    = 0x1e33dc;
 
+// Direcciones de Memoria Dinámica:
+constexpr uintptr_t ADDRESS_SHOTGUN_TOGGLE    = 0x9516b2; // bool
+constexpr uintptr_t ADDRESS_ROTATION_OFFSET   = 0x951658; // uint32_t
+constexpr uintptr_t ADDRESS_STRING_DRAW_HUD   = 0x0090cb2a; // char* (String pointer)
+
+// Offsets Relativos (A modificar según tu jerarquía interna de ser necesario)
+constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x30; // Offset para obtener PlayerController
 constexpr uintptr_t OFFSET_HEALTH_STATE       = 0x67c;
 constexpr int       STATE_KNOCKED             = 0x92f92;
-
-bool sg_lock_enabled = true; // Activado por defecto para pruebas
-bool ignore_knocked  = true;
-
-extern "C" __attribute__((visibility("default"))) void set_sglock_enabled(bool state) { sg_lock_enabled = state; }
-extern "C" __attribute__((visibility("default"))) bool get_sglock_enabled() { return sg_lock_enabled; }
 
 inline uintptr_t getRealOffset(uintptr_t offset) {
     return reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)) + offset;
@@ -94,46 +93,45 @@ bool ApplyVTableHookByIndex(void* instance, int vtableIndex, void* hookedFunc, v
 // [5. INTERCEPCIÓN DEL PROCESSEVENT (NÚCLEO DEL AIMLOCK)]
 // ============================================================================
 
-void (*orig_ProcessEvent)(void* _this, void* function, void* parms);
+// Firma actualizada con param_4 (hud) según requerimiento técnico.
+void (*orig_ProcessEvent)(void* _this, void* function, void* parms, void* hud);
 
-/**
- * @brief Helper ficticio para obtener el nombre de una UFunction.
- * Requiere implementar FNamePool en la versión final.
- */
-std::string GetUFunctionName(void* function) {
-    // TODO: Implementar la lectura real del nombre de la función desde FNamePool
-    // Por ahora, asumiremos que todos los eventos que entran son DrawHUD ya que hookeamos el HUD.
-    return "Function Engine.HUD.ReceiveDrawHUD";
-}
-
-/**
- * @brief Normaliza el ángulo Delta para que esté siempre entre -180 y 180.
- * Es crucial para que AddControllerInput no cause rotaciones erráticas o 360s en pantalla.
- */
 float NormalizeAxis(float angle) {
     while (angle > 180.f) angle -= 360.f;
     while (angle < -180.f) angle += 360.f;
     return angle;
 }
 
-void hooked_ProcessEvent(void* _this, void* function, void* parms) {
-    if (!sg_lock_enabled || !_this || !function) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
+void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
+    // 1. Memoria Dinámica: Interruptor (Shotgun Toggle)
+    bool isAimlockEnabled = *reinterpret_cast<bool*>(getRealOffset(ADDRESS_SHOTGUN_TOGGLE));
+    
+    if (!isAimlockEnabled || !_this || !function || !hud) {
+        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
         return;
     }
 
-    std::string funcName = GetUFunctionName(function);
+    // 2. Resolución de Strings (HUD) - _memcmp dinámico
+    char* targetEventString = reinterpret_cast<char*>(getRealOffset(ADDRESS_STRING_DRAW_HUD));
+    bool isDrawHUD = false;
     
-    if (funcName == "Function Engine.HUD.ReceiveDrawHUD") {
-        uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-        uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
+    // Asumiendo que el dylib base del autor original pasa el string evaluable en 'function' 
+    // o un puntero directo que puede compararse con _memcmp para evitar ofuscaciones de FName.
+    // "Function Engine.HUD.ReceiveDrawHUD" tiene 34 caracteres de longitud.
+    if (memcmp(function, targetEventString, 34) == 0) {
+        isDrawHUD = true;
+    }
+
+    if (isDrawHUD) {
+        // 3. Validación de Estructuras (Obtención de PlayerController desde param_4 "hud")
+        uintptr_t playerController = *reinterpret_cast<uintptr_t*>((uintptr_t)hud + OFFSET_PLAYER_CONTROLLER);
         
-        if (localPlayer) {
-            uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER);
-            if (playerController) {
-                
-                // Obtener WeaponID (Usualmente se extrae de la instancia del arma en el Pawn, 
-                // pero bajo requerimiento técnico lo pasaremos usando el puntero local).
+        if (playerController) {
+            uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
+            uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
+
+            if (localPlayer) {
+                // Obtener ID del Arma (WeaponID del jugador local)
                 int currentWeaponID = GetWeaponID(reinterpret_cast<void*>(localPlayer));
                 
                 // Filtro Exacto de Escopeta
@@ -144,6 +142,7 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms) {
                     uintptr_t closestEnemy = GetTargetForAimBotByFOV(p1, p2, 0.0);
 
                     if (closestEnemy) {
+                        // Filtro de Noqueados (Priority)
                         int healthState = *reinterpret_cast<int*>(closestEnemy + OFFSET_HEALTH_STATE);
                         if (healthState != STATE_KNOCKED) {
                             
@@ -152,24 +151,20 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms) {
                             FVector VectorDir = enemyPos - localPos;
                             
                             FRotator targetRotation = Conv_VectorToRotator(VectorDir);
-                            FRotator currentRotation = *reinterpret_cast<FRotator*>(playerController + OFFSET_CONTROL_ROTATION);
                             
-                            // Calcular Deltas normalizados
+                            // 4. Dynamic Rotation Offset
+                            uint32_t dynamicRotOffset = *reinterpret_cast<uint32_t*>(getRealOffset(ADDRESS_ROTATION_OFFSET));
+                            FRotator currentRotation = *reinterpret_cast<FRotator*>(playerController + dynamicRotOffset);
+                            
                             float deltaYaw = NormalizeAxis(targetRotation.Yaw - currentRotation.Yaw);
                             float deltaPitch = NormalizeAxis(targetRotation.Pitch - currentRotation.Pitch);
                             
-                            // Suavizado dinámico (Smooth factor) - 0.5f significa que girará a la mitad de la velocidad por frame
+                            // 5. Apuntado Suave (Smooth Persistence) mediante Input Nativo
                             float smoothing = 0.5f; 
                             
-                            if (OFFSET_ADD_YAW_INPUT != 0x000000 && AddControllerYawInput && AddControllerPitchInput) {
+                            if (AddControllerYawInput && AddControllerPitchInput) {
                                 AddControllerYawInput(reinterpret_cast<void*>(playerController), deltaYaw * smoothing);
                                 AddControllerPitchInput(reinterpret_cast<void*>(playerController), deltaPitch * smoothing);
-                            } else {
-                                // Fallback: Si no has insertado los offsets de AddInput, escribimos directo.
-                                FRotator smoothRotation = currentRotation;
-                                smoothRotation.Yaw += (deltaYaw * smoothing);
-                                smoothRotation.Pitch += (deltaPitch * smoothing);
-                                *reinterpret_cast<FRotator*>(playerController + OFFSET_CONTROL_ROTATION) = smoothRotation;
                             }
                         }
                     }
@@ -179,7 +174,7 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms) {
     }
 
     if (orig_ProcessEvent) {
-        orig_ProcessEvent(_this, function, parms);
+        orig_ProcessEvent(_this, function, parms, hud);
     }
 }
 
@@ -195,10 +190,8 @@ void BackgroundInjectionThread() {
     Conv_VectorToRotator = reinterpret_cast<FRotator (*)(FVector)>(getRealOffset(OFFSET_VECTOR_TO_ROTATOR));
     K2_GetActorLocation = reinterpret_cast<FVector (*)(uintptr_t)>(getRealOffset(OFFSET_ACTOR_LOCATION));
     
-    if (OFFSET_ADD_YAW_INPUT != 0x000000) {
-        AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
-        AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
-    }
+    AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
+    AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
 
     bool hookApplied = false;
 
@@ -206,18 +199,20 @@ void BackgroundInjectionThread() {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
         uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-        uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
+        if (!localPlayerBase) continue;
         
+        uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
         if (localPlayer) {
             printf("[LOG] LocalPlayer instanciado en memoria.\n");
             
-            uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER);
+            // Para el HUD, solemos buscarlo a través de PlayerController
+            uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
             if (playerController) {
-                uintptr_t hudInstance = *reinterpret_cast<uintptr_t*>(playerController + OFFSET_HUD);
+                // TODO: Usar el offset real para acceder a MyHUD desde el PlayerController (Ej. 0x2b0)
+                uintptr_t hudInstance = *reinterpret_cast<uintptr_t*>(playerController + 0x2b0); 
                 if (hudInstance) {
                     // El Índice VTable de ProcessEvent en UObject suele ser 66 o 67.
                     int processEventVTableIndex = 66; 
-                    
                     hookApplied = ApplyVTableHookByIndex(reinterpret_cast<void*>(hudInstance), 
                                                          processEventVTableIndex, 
                                                          reinterpret_cast<void*>(hooked_ProcessEvent), 
