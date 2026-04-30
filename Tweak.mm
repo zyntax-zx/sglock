@@ -29,7 +29,7 @@ struct FRotator {
 // [2. OFFSETS NATIVOS FINALIZADOS (Direcciones Base 0)]
 // ============================================================================
 
-constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0xdb8; // Validado por el autor
+constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788; // Símbolo _g_LocalPlayer
 constexpr uintptr_t OFFSET_WEAPON_ID_FUNC     = 0x4c546c;
 constexpr uintptr_t OFFSET_TARGET_SELECTOR    = 0x91e8;
 constexpr uintptr_t OFFSET_ACTOR_LOCATION     = 0x1b844c;
@@ -46,8 +46,7 @@ constexpr uintptr_t ADDRESS_STRING_DRAW_HUD   = 0x0090cb2a; // char*
 
 // Constantes de Instancia y Motor
 constexpr uintptr_t OFFSET_PROCESS_EVENT      = 0x260;    
-constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x30;
-constexpr uintptr_t OFFSET_HUD                = 0x2b0;    
+constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x548;
 constexpr uintptr_t OFFSET_HEALTH_STATE       = 0x67c;
 constexpr int       STATE_KNOCKED             = 0x92f92;
 
@@ -173,7 +172,7 @@ bool ApplyVTableHookByByteOffset(void* instance, size_t byteOffset, void* hooked
 // [7. INTERCEPCIÓN DEL PROCESSEVENT (NÚCLEO DEL AIMLOCK PERSISTENTE)]
 // ============================================================================
 
-void (*orig_ProcessEvent)(void* _this, void* function, void* parms, void* hud);
+void (*orig_ProcessEvent)(void* _this, void* function, void* parms);
 
 float NormalizeAxis(float angle) {
     while (angle > 180.f) angle -= 360.f;
@@ -181,20 +180,20 @@ float NormalizeAxis(float angle) {
     return angle;
 }
 
-void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
+void hooked_ProcessEvent(void* _this, void* function, void* parms) {
     // 1. Regla de Oro: Retorno ultra-rápido si está desactivado por el UI Switch
     if (!g_SGLock_Active) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
+        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
         return;
     }
 
     // 2. Validación estricta contra punteros nulos para evadir EXC_BAD_ACCESS
-    if (!_this || !function || !hud) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms, hud);
+    if (!_this || !function) {
+        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
         return;
     }
 
-    // 3. Resolución de Evento (HUD) - _memcmp nativo
+    // 3. Resolución de Evento - _memcmp nativo
     char* targetEventString = reinterpret_cast<char*>(getRealOffset(ADDRESS_STRING_DRAW_HUD));
     bool isDrawHUD = false;
     
@@ -205,8 +204,8 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
     }
 
     if (isDrawHUD) {
-        // Validación de Estructuras 
-        uintptr_t playerController = *reinterpret_cast<uintptr_t*>((uintptr_t)hud + OFFSET_PLAYER_CONTROLLER);
+        // Al hookear el PlayerController, '_this' es la instancia del PlayerController
+        uintptr_t playerController = reinterpret_cast<uintptr_t>(_this);
         if (IS_VALID_PTR(playerController)) {
             
             uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
@@ -256,7 +255,7 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
     }
 
     if (orig_ProcessEvent) {
-        orig_ProcessEvent(_this, function, parms, hud);
+        orig_ProcessEvent(_this, function, parms);
     }
 }
 
@@ -278,12 +277,15 @@ void BackgroundInjectionThread() {
     AddControllerYawInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
     AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
 
-    bool hookApplied = false;
-    bool uiInjected = false;
+    // Independencia de la UI: Inyectar botón siempre, pase lo que pase
+    InjectMasterSwitchUI();
+    printf("[LOG] UI inyectada. Buscando G_LocalPlayer...\n");
 
-    // Bucle de espera pasiva hasta encontrar la instancia de HUD
+    bool hookApplied = false;
+
+    // Bucle de espera pasiva hasta encontrar la instancia de LocalPlayer
     while (!hookApplied) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
         uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
         if (!IS_VALID_PTR(localPlayerBase)) continue;
@@ -291,26 +293,18 @@ void BackgroundInjectionThread() {
         uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
         if (IS_VALID_PTR(localPlayer)) {
             
+            // LocalPlayer + 0x548 según v2.0
             uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
             if (IS_VALID_PTR(playerController)) {
-                uintptr_t hudInstance = *reinterpret_cast<uintptr_t*>(playerController + OFFSET_HUD); 
-                if (IS_VALID_PTR(hudInstance)) {
-                    
-                    hookApplied = ApplyVTableHookByByteOffset(reinterpret_cast<void*>(hudInstance), 
-                                                              OFFSET_PROCESS_EVENT, 
-                                                              reinterpret_cast<void*>(hooked_ProcessEvent), 
-                                                              reinterpret_cast<void**>(&orig_ProcessEvent));
-                                                  
-                    if (hookApplied) {
-                        printf("[LOG] Intentando VTable Swap en ProcessEvent (HUD). Exito!\n");
-                        
-                        // Safe Start Extremo: Inyectar UI únicamente después de que el hook sea exitoso
-                        // Esto garantiza que el HUD existe y estamos físicamente en una partida
-                        if (!uiInjected) {
-                            InjectMasterSwitchUI();
-                            uiInjected = true;
-                        }
-                    }
+                
+                // VTable Swap directamente en PlayerController
+                hookApplied = ApplyVTableHookByByteOffset(reinterpret_cast<void*>(playerController), 
+                                                          OFFSET_PROCESS_EVENT, 
+                                                          reinterpret_cast<void*>(hooked_ProcessEvent), 
+                                                          reinterpret_cast<void**>(&orig_ProcessEvent));
+                                              
+                if (hookApplied) {
+                    printf("[LOG] Intentando VTable Swap en ProcessEvent (PlayerController). Exito!\n");
                 }
             }
         }
