@@ -56,7 +56,6 @@ constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
 constexpr uintptr_t OFF_HEALTH_STATE      = 0x67c;
 constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;
 constexpr int       STATE_KNOCKED         = 0x92f92;
-constexpr float     SMOOTH                = 0.5f;
 
 #define IS_VALID_PTR(p)    ((uintptr_t)(p) > 0x100000000ULL)
 #define IS_ALIGNED_PTR(p)  (((uintptr_t)(p) & 0x7) == 0)
