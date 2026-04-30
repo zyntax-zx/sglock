@@ -1,6 +1,7 @@
 #include <mach-o/dyld.h>
 #include <stdint.h>
 #include <cmath>
+#include <cstdio>
 
 // Dependencia de hooking (Dobby). Asegúrate de tener Dobby.h en tu entorno Theos ($THEOS/include).
 #include <dobby.h>
