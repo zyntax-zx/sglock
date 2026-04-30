@@ -1,1 +1,1 @@
-{ Filter = { Bundles = ( "com.tencent.ig" ); }; }
+{ Filter = { Executables = ( "ShadowTrackerExtra" ); Bundles = ( "com.tencent.ig", "com.rekoo.pubgm", "com.pubg.krmobile", "com.vng.pubgmobile", "com.tencent.tmgp.pubgmhd", "com.pubg.imobile" ); }; }
