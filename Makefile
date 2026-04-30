@@ -9,7 +9,7 @@ TWEAK_NAME = sglock
 
 sglock_FILES = Tweak.mm
 sglock_CFLAGS = -fobjc-arc -std=c++17
-sglock_FRAMEWORKS = UIKit Foundation
+sglock_FRAMEWORKS = UIKit Foundation QuartzCore
 sglock_LDFLAGS =
 
 include $(THEOS_MAKE_PATH)/tweak.mk
