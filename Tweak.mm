@@ -3,6 +3,7 @@
 #include <mach-o/dyld.h>
 #include <stdint.h>
 #include <cmath>
+#include <cstdio>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -14,9 +15,6 @@
 struct FVector {
     float X, Y, Z;
     FVector operator-(const FVector& o) const { return {X-o.X, Y-o.Y, Z-o.Z}; }
-    float Dist(const FVector& o) const {
-        return sqrtf((X-o.X)*(X-o.X) + (Y-o.Y)*(Y-o.Y) + (Z-o.Z)*(Z-o.Z));
-    }
 };
 
 struct FRotator { float Pitch, Yaw, Roll; };
@@ -29,22 +27,36 @@ static FRotator VecToRot(FVector d) {
     };
 }
 
+static float NormAxis(float a) {
+    while (a >  180.f) a -= 360.f;
+    while (a < -180.f) a += 360.f;
+    return a;
+}
+
 // ============================================================================
-// [2. TRUTH TABLE v4.6 — PURE MEMORY READ (PAC-SAFE)]
+// [2. TRUTH TABLE v5.0 — SDK DIRECTO (Confirmado v2.0 Logic)]
 // ============================================================================
 
-// Anclas de memoria (Sección __DATA)
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray
-constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer
-constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
+// Anclas de Memoria
+constexpr uintptr_t ADDR_GWORLD           = 0x951770;
 
-// Offsets de Clase (UE4 Standard / Ghidra Verified)
-constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;   // ULocalPlayer -> APlayerController
-constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;  // APlayerController -> ControlRotation
-constexpr uintptr_t OFF_Pawn              = 0x3d0;  // APlayerController -> APawn
-constexpr uintptr_t OFF_RootComp          = 0x130;  // AActor -> RootComponent
-constexpr uintptr_t OFF_RelativeLoc       = 0x11c;  // USceneComponent -> RelativeLocation
-constexpr uintptr_t OFF_WeaponID          = 0x618;  // APawn -> WeaponID (Ajustar si es necesario)
+// Funciones Nativas (Offsets v2.0)
+constexpr uintptr_t OFF_GET_WEAPON_ID     = 0x4c546c;
+constexpr uintptr_t OFF_PICK_TARGET       = 0x0b27f0;
+constexpr uintptr_t OFF_K2_ACTOR_LOC      = 0x1b844c;
+constexpr uintptr_t OFF_ADD_YAW           = 0x1e3294;
+constexpr uintptr_t OFF_ADD_PITCH         = 0x1e33dc;
+
+// Jerarquía Unreal Engine
+constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
+constexpr uintptr_t OFF_LOCAL_PLAYERS     = 0x38;
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
+
+// Offsets de Combate
+constexpr uintptr_t OFF_HEALTH_STATE      = 0x67c;
+constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;
+constexpr int       STATE_KNOCKED         = 0x92f92;
+constexpr float     SMOOTH                = 0.5f;
 
 #define IS_VALID_PTR(p)    ((uintptr_t)(p) > 0x100000000ULL)
 #define IS_ALIGNED_PTR(p)  (((uintptr_t)(p) & 0x7) == 0)
@@ -59,88 +71,81 @@ static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
 // [3. ESTADO GLOBAL]
 // ============================================================================
 
-static bool g_Active = false;
+static bool g_Active    = false;
+static int  g_LogTick   = 0; 
+
+// Punteros de función con tipado para evitar PAC crashes (usando invocación estándar arm64)
+static int       (*GetWeaponID)(void*);
+static uintptr_t (*PickTarget)(void*, void*, double);
+static FVector   (*K2_GetActorLocation)(uintptr_t);
+static void      (*AddYaw)(void*, float);
+static void      (*AddPitch)(void*, float);
 
 // ============================================================================
-// [4. LÓGICA DE ESCANEO PASIVO (Iteración de Objetos)]
+// [4. LÓGICA DE COMBATE (SDK Directo — CADisplayLink Tick)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
     if (!g_Active) return;
 
-    // ── Paso 1: Obtener LocalPlayer desde __DATA ─────────────────────────────
-    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
-    if (!IS_SAFE_PTR(lpPtr)) return;
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] LocalPlayer encontrado en DATA: 0x%lX", lpPtr);
+    // ── Paso 1: Navegación de Punteros Paso a Paso (GWorld 0x951770) ──────────
+    uintptr_t wAddr = OFF(ADDR_GWORLD);
+    if (!IS_SAFE_PTR(wAddr)) return;
+    
+    uintptr_t world = *reinterpret_cast<uintptr_t*>(wAddr);
+    if (!IS_SAFE_PTR(world)) {
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld nulo (esperando partida)...");
+        return;
+    }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld: 0x%lX", world);
 
-    // ── Paso 2: Obtener PlayerController y Pawn ──────────────────────────────
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
-    if (!IS_SAFE_PTR(ctrl)) return;
+    uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
+    if (!IS_SAFE_PTR(gi)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: GameInstance nulo."); return; }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] GameInstance: 0x%lX", gi);
 
-    uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
-    if (!IS_SAFE_PTR(myPawn)) return;
+    uintptr_t lpArrPtr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
+    if (!IS_SAFE_PTR(lpArrPtr)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: LocalPlayerArray nulo."); return; }
 
-    // ── Paso 3: Filtro de Arma (Lectura Pasiva) ──────────────────────────────
-    int wid = *reinterpret_cast<int*>(myPawn + OFF_WeaponID); 
+    uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpArrPtr);
+    if (!IS_SAFE_PTR(lp)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: LocalPlayer[0] nulo."); return; }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] LocalPlayer: 0x%lX", lp);
+
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lp + OFF_PLAYER_CTRL);
+    if (!IS_SAFE_PTR(ctrl)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: PlayerController nulo."); return; }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] Controller: 0x%lX", ctrl);
+
+    // ── Paso 2: Filtro de Arma (Invocación Nativa) ───────────────────────────
+    int wid = GetWeaponID(reinterpret_cast<void*>(lp));
     bool isShotgun = (((wid - 0x19641) < 4) || (wid == 0x196a5));
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] WeaponID: 0x%X | isShotgun: %s", wid, isShotgun ? "SI" : "NO");
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] WeaponID: 0x%X | isShotgun: %s", (unsigned)wid, isShotgun ? "SI" : "NO");
     if (!isShotgun) return;
 
-    // ── Paso 4: Iterar GUObjectArray para buscar enemigos ────────────────────
-    uintptr_t objArrayBase = OFF(ADDR_GOBJECTS);
-    uintptr_t objects = *reinterpret_cast<uintptr_t*>(objArrayBase + 0x10);
-    int numObjects = *reinterpret_cast<int*>(objArrayBase + 0x18);
-    
-    if (!IS_SAFE_PTR(objects) || numObjects <= 0) return;
-
-    uintptr_t bestEnemy = 0;
-    float minDist = 999999.0f;
-
-    // Escaneo limitado para rendimiento en Jailed
-    int maxScan = (numObjects > 10000) ? 10000 : numObjects;
-    
-    for (int i = 0; i < maxScan; i++) {
-        uintptr_t item = *reinterpret_cast<uintptr_t*>(objects + (i * 24)); // FUObjectItem size = 24
-        if (!IS_SAFE_PTR(item)) continue;
-        
-        // Filtro básico de clase (esto es genérico, en UE4 real se usa NameIndex)
-        // Por ahora confiamos en la validación de punteros y distancia
-        uintptr_t root = *reinterpret_cast<uintptr_t*>(item + OFF_RootComp);
-        if (!IS_SAFE_PTR(root) || item == myPawn) continue;
-
-        FVector enLoc = *reinterpret_cast<FVector*>(root + OFF_RelativeLoc);
-        FVector myLoc = *reinterpret_cast<FVector*>(*reinterpret_cast<uintptr_t*>(myPawn + OFF_RootComp) + OFF_RelativeLoc);
-        
-        float d = myLoc.Dist(enLoc);
-        if (d < minDist && d > 10.0f) {
-            minDist = d;
-            bestEnemy = item;
-        }
+    // ── Paso 3: Buscar Objetivo (PickTarget 0x0b27f0) ────────────────────────
+    uint8_t p1[16] = {}, p2[16] = {};
+    uintptr_t enemy = PickTarget(p1, p2, 90.0);
+    if (!IS_SAFE_PTR(enemy)) {
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] Sin objetivos en FOV.");
+        return;
     }
+    if (doLog) NSLog(@"[SGLOCK_DEBUG] Objetivo: 0x%lX", enemy);
 
-    if (!IS_SAFE_PTR(bestEnemy)) return;
+    // ── Paso 4: Cálculo y Movimiento de Mira (AddControllerInput) ────────────
+    int hp = *reinterpret_cast<int*>(enemy + OFF_HEALTH_STATE);
+    if (hp == STATE_KNOCKED) return;
 
-    // ── Paso 5: Cálculo de Rotación ──────────────────────────────────────────
-    uintptr_t myRoot = *reinterpret_cast<uintptr_t*>(myPawn + OFF_RootComp);
-    uintptr_t enRoot = *reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp);
-    
-    FVector myPos = *reinterpret_cast<FVector*>(myRoot + OFF_RelativeLoc);
-    FVector enPos = *reinterpret_cast<FVector*>(enRoot + OFF_RelativeLoc);
-    
-    FRotator tgt = VecToRot(enPos - myPos);
+    FVector myPos = K2_GetActorLocation(lp);
+    FVector enPos = K2_GetActorLocation(enemy);
+    FRotator tgt  = VecToRot(enPos - myPos);
+    FRotator cur  = *reinterpret_cast<FRotator*>(ctrl + OFF_CTRL_ROTATION);
 
-    // ── Paso 6: Escritura de Rotación (Directa a Memoria — PAC Safe) ──────────
-    // Obtenemos el offset dinámico de rotación guardado en ADDR_ROT_BASE_OFF
-    uintptr_t dynamicRotOffset = *reinterpret_cast<uintptr_t*>(OFF(ADDR_ROT_BASE_OFF));
-    
-    // Si el offset no es válido, usamos el estandar 0x2e8 como fallback
-    uintptr_t finalRotAddr = (dynamicRotOffset > 0 && dynamicRotOffset < 0x2000) 
-                             ? (ctrl + dynamicRotOffset) 
-                             : (ctrl + OFF_CTRL_ROTATION);
+    float dY = NormAxis(tgt.Yaw   - cur.Yaw);
+    float dP = NormAxis(tgt.Pitch - cur.Pitch);
 
-    if (IS_SAFE_PTR(finalRotAddr)) {
-        *reinterpret_cast<FRotator*>(finalRotAddr) = tgt;
-        if (doLog) NSLog(@"[SGLOCK_DEBUG] Aimlock aplicado a: 0x%lX", finalRotAddr);
+    if (AddYaw && AddPitch) {
+        constexpr float TEST_SMOOTH = 0.5f; // Suavizado moderado
+        AddYaw  (reinterpret_cast<void*>(ctrl), dY * TEST_SMOOTH);
+        AddPitch(reinterpret_cast<void*>(ctrl), dP * TEST_SMOOTH);
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] AddInput -> P:%.2f Y:%.2f", dP * TEST_SMOOTH, dY * TEST_SMOOTH);
     }
 }
 
@@ -155,17 +160,18 @@ static void AimlockTick(bool doLog) {
 @end
 
 @implementation SGLockDriver
-static int tickCount = 0;
-
 - (void)start {
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onFrame:)];
+    self.displayLink.preferredFramesPerSecond = 60;
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    NSLog(@"[SGLOCK_DEBUG] Driver de Lectura Pura iniciado.");
+    NSLog(@"[SGLOCK_DEBUG] Driver SDK Directo activo.");
 }
-
 - (void)onFrame:(CADisplayLink*)link {
-    bool doLog = (++tickCount >= 60);
-    if (doLog) tickCount = 0;
+    bool doLog = (++g_LogTick >= 60);
+    if (doLog) {
+        g_LogTick = 0;
+        NSLog(@"[SGLOCK_DEBUG] Ciclo activo. Toggle: %d", g_Active);
+    }
     AimlockTick(doLog);
 }
 @end
@@ -182,15 +188,10 @@ static SGLockDriver* g_Driver = nil;
 @implementation SGLockButton
 - (void)toggle {
     g_Active = !g_Active;
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [gen prepare]; [gen impactOccurred];
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
     NSLog(@"[SGLOCK_DEBUG] TOGGLE: %s", g_Active ? "ON" : "OFF");
-}
-- (void)pan:(UIPanGestureRecognizer*)r {
-    if (r.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [r translationInView:self.superview];
-        self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-        [r setTranslation:CGPointZero inView:self.superview];
-    }
 }
 @end
 
@@ -206,12 +207,11 @@ static void InjectUI() {
         btn.backgroundColor = UIColor.redColor;
         btn.alpha = 0.8f;
         [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:btn action:@selector(pan:)];
-        [btn addGestureRecognizer:pan];
         [win addSubview:btn];
 
         g_Driver = [[SGLockDriver alloc] init];
         [g_Driver start];
+        NSLog(@"[SGLOCK_DEBUG] UI + Driver v5.0 listos.");
     });
 }
 
@@ -219,10 +219,24 @@ static void InjectUI() {
 // [7. INICIALIZACIÓN]
 // ============================================================================
 
+static void StartupThread() {
+    NSLog(@"[SGLOCK_DEBUG] DYLIB CARGADO (v5.0). Base: 0x%llX", (unsigned long long)BASE());
+
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+
+    // Resolución de funciones nativas
+    GetWeaponID         = reinterpret_cast<int(*)(void*)>                 (OFF(OFF_GET_WEAPON_ID));
+    PickTarget          = reinterpret_cast<uintptr_t(*)(void*,void*,double)>(OFF(OFF_PICK_TARGET));
+    K2_GetActorLocation = reinterpret_cast<FVector(*)(uintptr_t)>          (OFF(OFF_K2_ACTOR_LOC));
+    AddYaw              = reinterpret_cast<void(*)(void*,float)>           (OFF(OFF_ADD_YAW));
+    AddPitch            = reinterpret_cast<void(*)(void*,float)>           (OFF(OFF_ADD_PITCH));
+
+    NSLog(@"[SGLOCK_DEBUG] Funciones resueltas. Inyectando UI...");
+    InjectUI();
+}
+
 __attribute__((constructor))
 static void init() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        InjectUI();
-        NSLog(@"[SGLOCK_DEBUG] Sistema v4.6 cargado.");
-    });
+    if (!_dyld_get_image_header(0)) return;
+    std::thread(StartupThread).detach();
 }
