@@ -33,12 +33,14 @@ static float NormAxis(float a) {
 }
 
 // ============================================================================
-// [2. SDK ANCHORS — TABLA DE LA VERDAD v2.0]
+// [2. SDK ANCHORS — TRUTH TABLE v3.1 (Validado en Ghidra)]
 // ============================================================================
 
-// Anclas del motor
-constexpr uintptr_t ADDR_GWORLD           = 0x951770; // UWorld*
-constexpr uintptr_t VTABLE_PROCESS_EVENT  = 0x260;    // Índice en VTable
+// Anclas globales del motor
+constexpr uintptr_t ADDR_GWORLD           = 0x951770; // _GWorldNum (UWorld*)
+constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray (FUObjectArray*)
+constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer (ancla de validación)
+constexpr uintptr_t VTABLE_PROCESS_EVENT  = 0x260;    // Byte-offset ProcessEvent (índice 76)
 
 // Funciones nativas
 constexpr uintptr_t OFF_GET_WEAPON_ID     = 0x4c546c;
@@ -56,11 +58,13 @@ constexpr int       STATE_KNOCKED         = 0x92f92;
 // FUObjectArray layout (UE4 ARM64)
 
 
-// GWorld → HUD path
+// GWorld → HUD path (Confirmado en Ghidra sobre binario funcional)
+// GWorld(0x951770) → GameInstance(+0x180) → LocalPlayers(+0x38)
+// → LocalPlayer[0] → PlayerController(+0x30) → HUD(+0x2b0)
 constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
 constexpr uintptr_t OFF_LOCAL_PLAYERS     = 0x38;
-constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
-constexpr uintptr_t OFF_HUD               = 0x2b0;
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;  // ULocalPlayer → APlayerController
+constexpr uintptr_t OFF_HUD               = 0x2b0; // APlayerController → AHUD
 
 #define IS_VALID_PTR(p) ((uintptr_t)(p) > 0x100000000ULL)
 
@@ -264,6 +268,17 @@ static void hooked_PE(void* _this, void* func, void* parms) {
     }
 
     // Navegar GWorld → HUD → PlayerController
+    // Validación rápida con ancla de LocalPlayer (0x951788)
+    // Si es 0, el jugador aún no ha cargado en el mapa → salir
+    uintptr_t lpAnchor = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
+    if (!IS_VALID_PTR(lpAnchor)) {
+        if (orig_PE) orig_PE(_this, func, parms);
+        return;
+    }
+
+    // ADDR_GOBJECTS reservado para futura iteración dinámica de objetos
+    (void)ADDR_GOBJECTS;
+
     uintptr_t world = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
     if (!IS_VALID_PTR(world)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
@@ -327,7 +342,7 @@ static void InjectionThread() {
     AddYaw              = (void(*)(void*,float))   OFF(OFF_ADD_YAW);
     AddPitch            = (void(*)(void*,float))   OFF(OFF_ADD_PITCH);
 
-    // FASE 2 — UI en main thread (siempre)
+    // FASE 2 — UI en main thread SIEMPRE a T+15s (independiente del hook)
     InjectUI();
 
     // FASE 3 — Symbol Rebinding PAC-Safe sobre __DATA
