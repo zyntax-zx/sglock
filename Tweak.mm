@@ -34,27 +34,25 @@ static float NormAxis(float a) {
 }
 
 // ============================================================================
-// [2. TRUTH TABLE v5.0 — SDK DIRECTO (Confirmado v2.0 Logic)]
+// [2. TRUTH TABLE v5.1 — 'AIM-INSIDE-ESP' (Functional Decompiler Logic)]
 // ============================================================================
 
-// Anclas de Memoria
-constexpr uintptr_t ADDR_GWORLD           = 0x951770;
+// Offsets de Funciones Nativas
+constexpr uintptr_t FUNC_GET_FULL_WORLD  = 0xaf18;
+constexpr uintptr_t FUNC_ADD_YAW         = 0x1e3294;
+constexpr uintptr_t FUNC_ADD_PITCH       = 0x1e33dc;
+constexpr uintptr_t FUNC_GET_WEAPON_ID   = 0x4c546c;
+constexpr uintptr_t FUNC_PICK_TARGET     = 0x0b27f0;
+constexpr uintptr_t FUNC_K2_ACTOR_LOC    = 0x1b844c;
 
-// Funciones Nativas (Offsets v2.0)
-constexpr uintptr_t OFF_GET_WEAPON_ID     = 0x4c546c;
-constexpr uintptr_t OFF_PICK_TARGET       = 0x0b27f0;
-constexpr uintptr_t OFF_K2_ACTOR_LOC      = 0x1b844c;
-constexpr uintptr_t OFF_ADD_YAW           = 0x1e3294;
-constexpr uintptr_t OFF_ADD_PITCH         = 0x1e33dc;
+// Offsets de Datos (Anclas)
+constexpr uintptr_t ADDR_LOCAL_PLAYER    = 0x951788; // _g_LocalPlayer
+constexpr uintptr_t TOGGLE_SHORTGUN      = 0x9516b2; // Interruptor dinámico del juego
 
-// Jerarquía Unreal Engine
-constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
-constexpr uintptr_t OFF_LOCAL_PLAYERS     = 0x38;
-constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
-
-// Offsets de Combate
+// Offsets Estándar UE4
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;   // LocalPlayer -> Controller
+constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;  // Controller -> Rotation
 constexpr uintptr_t OFF_HEALTH_STATE      = 0x67c;
-constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;
 constexpr int       STATE_KNOCKED         = 0x92f92;
 
 #define IS_VALID_PTR(p)    ((uintptr_t)(p) > 0x100000000ULL)
@@ -73,7 +71,7 @@ static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
 static bool g_Active    = false;
 static int  g_LogTick   = 0; 
 
-// Punteros de función con tipado para evitar PAC crashes (usando invocación estándar arm64)
+static uintptr_t (*GetFullWorld)(void);
 static int       (*GetWeaponID)(void*);
 static uintptr_t (*PickTarget)(void*, void*, double);
 static FVector   (*K2_GetActorLocation)(uintptr_t);
@@ -81,54 +79,50 @@ static void      (*AddYaw)(void*, float);
 static void      (*AddPitch)(void*, float);
 
 // ============================================================================
-// [4. LÓGICA DE COMBATE (SDK Directo — CADisplayLink Tick)]
+// [4. LÓGICA DE COMBATE (v5.1 — Sincronizada con el ESP del Autor)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
-    if (!g_Active) return;
-
-    // ── Paso 1: Navegación de Punteros Paso a Paso (GWorld 0x951770) ──────────
-    uintptr_t wAddr = OFF(ADDR_GWORLD);
-    if (!IS_SAFE_PTR(wAddr)) return;
-    
-    uintptr_t world = *reinterpret_cast<uintptr_t*>(wAddr);
+    // Paso 1: GWorld dinámico
+    if (!GetFullWorld) return;
+    uintptr_t world = GetFullWorld();
     if (!IS_SAFE_PTR(world)) {
-        if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld nulo (esperando partida)...");
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld nulo (fuera de partida).");
         return;
     }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] GWorld: 0x%lX", world);
 
-    uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
-    if (!IS_SAFE_PTR(gi)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: GameInstance nulo."); return; }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] GameInstance: 0x%lX", gi);
+    // Paso 2: LocalPlayer desde ancla 0x951788
+    uintptr_t lpPtr = OFF(ADDR_LOCAL_PLAYER);
+    if (!IS_SAFE_PTR(lpPtr)) return;
+    uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpPtr);
+    if (!IS_SAFE_PTR(lp)) {
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] LocalPlayer nulo.");
+        return;
+    }
 
-    uintptr_t lpArrPtr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
-    if (!IS_SAFE_PTR(lpArrPtr)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: LocalPlayerArray nulo."); return; }
+    // Paso 3: Validación de Toggles (Manual + Juego)
+    bool gameToggle = *reinterpret_cast<bool*>(OFF(TOGGLE_SHORTGUN));
+    if (!g_Active || !gameToggle) return;
 
-    uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpArrPtr);
-    if (!IS_SAFE_PTR(lp)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: LocalPlayer[0] nulo."); return; }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] LocalPlayer: 0x%lX", lp);
-
+    // Paso 4: PlayerController
     uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lp + OFF_PLAYER_CTRL);
-    if (!IS_SAFE_PTR(ctrl)) { if (doLog) NSLog(@"[SGLOCK_DEBUG] FAIL: PlayerController nulo."); return; }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] Controller: 0x%lX", ctrl);
+    if (!IS_SAFE_PTR(ctrl)) return;
 
-    // ── Paso 2: Filtro de Arma (Invocación Nativa) ───────────────────────────
+    // Paso 5: Filtro de Arma (0x4c546c)
     int wid = GetWeaponID(reinterpret_cast<void*>(lp));
     bool isShotgun = (((wid - 0x19641) < 4) || (wid == 0x196a5));
     if (doLog) NSLog(@"[SGLOCK_DEBUG] WeaponID: 0x%X | isShotgun: %s", (unsigned)wid, isShotgun ? "SI" : "NO");
     if (!isShotgun) return;
 
-    // ── Paso 3: Buscar Objetivo (PickTarget 0x0b27f0) ────────────────────────
+    // Paso 6: Buscar Objetivo (PickTarget 0x0b27f0)
     uint8_t p1[16] = {}, p2[16] = {};
     uintptr_t enemy = PickTarget(p1, p2, 90.0);
     if (!IS_SAFE_PTR(enemy)) {
         if (doLog) NSLog(@"[SGLOCK_DEBUG] Sin objetivos en FOV.");
         return;
     }
-    if (doLog) NSLog(@"[SGLOCK_DEBUG] Objetivo: 0x%lX", enemy);
 
-    // ── Paso 4: Cálculo y Movimiento de Mira (AddControllerInput) ────────────
+    // Paso 7: Cálculo y Movimiento de Mira (Smooth 0.5)
     int hp = *reinterpret_cast<int*>(enemy + OFF_HEALTH_STATE);
     if (hp == STATE_KNOCKED) return;
 
@@ -141,35 +135,32 @@ static void AimlockTick(bool doLog) {
     float dP = NormAxis(tgt.Pitch - cur.Pitch);
 
     if (AddYaw && AddPitch) {
-        constexpr float TEST_SMOOTH = 0.5f; // Suavizado moderado
-        AddYaw  (reinterpret_cast<void*>(ctrl), dY * TEST_SMOOTH);
-        AddPitch(reinterpret_cast<void*>(ctrl), dP * TEST_SMOOTH);
-        if (doLog) NSLog(@"[SGLOCK_DEBUG] AddInput -> P:%.2f Y:%.2f", dP * TEST_SMOOTH, dY * TEST_SMOOTH);
+        // Invocación nativa exacta (val * 0.5)
+        AddYaw  (reinterpret_cast<void*>(ctrl), dY * 0.5f);
+        AddPitch(reinterpret_cast<void*>(ctrl), dP * 0.5f);
+        if (doLog) NSLog(@"[SGLOCK_DEBUG] AddInput Aplicado.");
     }
 }
 
 // ============================================================================
-// [5. CADISPLAYLINK CONTROLLER]
+// [5. DRIVER DE SINCRONIZACIÓN (CADisplayLink)]
 // ============================================================================
 
 @interface SGLockDriver : NSObject
 @property (nonatomic, strong) CADisplayLink *displayLink;
-- (void)start;
-- (void)onFrame:(CADisplayLink*)link;
 @end
 
 @implementation SGLockDriver
 - (void)start {
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onFrame:)];
-    self.displayLink.preferredFramesPerSecond = 60;
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    NSLog(@"[SGLOCK_DEBUG] Driver SDK Directo activo.");
+    NSLog(@"[SGLOCK_DEBUG] Driver ESP-Sync Activo.");
 }
 - (void)onFrame:(CADisplayLink*)link {
     bool doLog = (++g_LogTick >= 60);
     if (doLog) {
         g_LogTick = 0;
-        NSLog(@"[SGLOCK_DEBUG] Ciclo activo. Toggle: %d", g_Active);
+        NSLog(@"[SGLOCK_DEBUG] Ciclo Activo. Toggle: %d", g_Active);
     }
     AimlockTick(doLog);
 }
@@ -187,10 +178,8 @@ static SGLockDriver* g_Driver = nil;
 @implementation SGLockButton
 - (void)toggle {
     g_Active = !g_Active;
-    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [gen prepare]; [gen impactOccurred];
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
-    NSLog(@"[SGLOCK_DEBUG] TOGGLE: %s", g_Active ? "ON" : "OFF");
+    NSLog(@"[SGLOCK_DEBUG] TOGGLE MANUAL: %d", g_Active);
 }
 @end
 
@@ -204,13 +193,11 @@ static void InjectUI() {
         btn.frame = CGRectMake(20, 100, 44, 44);
         btn.layer.cornerRadius = 22;
         btn.backgroundColor = UIColor.redColor;
-        btn.alpha = 0.8f;
         [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [win addSubview:btn];
 
         g_Driver = [[SGLockDriver alloc] init];
         [g_Driver start];
-        NSLog(@"[SGLOCK_DEBUG] UI + Driver v5.0 listos.");
     });
 }
 
@@ -219,18 +206,17 @@ static void InjectUI() {
 // ============================================================================
 
 static void StartupThread() {
-    NSLog(@"[SGLOCK_DEBUG] DYLIB CARGADO (v5.0). Base: 0x%llX", (unsigned long long)BASE());
-
+    NSLog(@"[SGLOCK_DEBUG] Iniciando v5.1 'Internal SDK'...");
     std::this_thread::sleep_for(std::chrono::seconds(10));
 
     // Resolución de funciones nativas
-    GetWeaponID         = reinterpret_cast<int(*)(void*)>                 (OFF(OFF_GET_WEAPON_ID));
-    PickTarget          = reinterpret_cast<uintptr_t(*)(void*,void*,double)>(OFF(OFF_PICK_TARGET));
-    K2_GetActorLocation = reinterpret_cast<FVector(*)(uintptr_t)>          (OFF(OFF_K2_ACTOR_LOC));
-    AddYaw              = reinterpret_cast<void(*)(void*,float)>           (OFF(OFF_ADD_YAW));
-    AddPitch            = reinterpret_cast<void(*)(void*,float)>           (OFF(OFF_ADD_PITCH));
+    GetFullWorld        = reinterpret_cast<uintptr_t(*)(void)>            (OFF(FUNC_GET_FULL_WORLD));
+    GetWeaponID         = reinterpret_cast<int(*)(void*)>                 (OFF(FUNC_GET_WEAPON_ID));
+    PickTarget          = reinterpret_cast<uintptr_t(*)(void*,void*,double)>(OFF(FUNC_PICK_TARGET));
+    K2_GetActorLocation = reinterpret_cast<FVector(*)(uintptr_t)>          (OFF(FUNC_K2_ACTOR_LOC));
+    AddYaw              = reinterpret_cast<void(*)(void*,float)>           (OFF(FUNC_ADD_YAW));
+    AddPitch            = reinterpret_cast<void(*)(void*,float)>           (OFF(FUNC_ADD_PITCH));
 
-    NSLog(@"[SGLOCK_DEBUG] Funciones resueltas. Inyectando UI...");
     InjectUI();
 }
 
