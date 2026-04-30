@@ -8,8 +8,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = sglock
 
 sglock_FILES = Tweak.mm
-sglock_CFLAGS = -fobjc-arc -std=c++17 -I./include
-sglock_LDFLAGS = -L./lib
-sglock_LIBRARIES = dobby
+sglock_CFLAGS = -fobjc-arc -std=c++17
+sglock_LDFLAGS =
 
 include $(THEOS_MAKE_PATH)/tweak.mk
