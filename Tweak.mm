@@ -7,324 +7,398 @@
 #include <cstdio>
 #include <thread>
 #include <chrono>
-#include <sys/mman.h>
 #include <unistd.h>
 #include <cstring>
-#include <dlfcn.h>
 
 // ============================================================================
-// [1. ESTRUCTURAS Y MATEMÁTICAS]
+// [1. ESTRUCTURAS MATEMÁTICAS]
 // ============================================================================
 
 struct FVector {
     float X, Y, Z;
-    FVector operator-(const FVector& Other) const {
-        return { X - Other.X, Y - Other.Y, Z - Other.Z };
-    }
+    FVector operator-(const FVector& o) const { return {X-o.X, Y-o.Y, Z-o.Z}; }
 };
 
-struct FRotator {
-    float Pitch, Yaw, Roll;
-};
+struct FRotator { float Pitch, Yaw, Roll; };
 
-FRotator VectorToRotator(FVector dir) {
-    FRotator rot;
-    rot.Yaw   = atan2f(dir.Y, dir.X) * (180.0f / M_PI);
-    rot.Pitch = atan2f(dir.Z, sqrtf(dir.X * dir.X + dir.Y * dir.Y)) * (180.0f / M_PI);
-    rot.Roll  = 0.0f;
-    return rot;
+static FRotator VecToRot(FVector d) {
+    return { atan2f(d.Z, sqrtf(d.X*d.X+d.Y*d.Y)) * (180.f/(float)M_PI),
+             atan2f(d.Y, d.X) * (180.f/(float)M_PI), 0.f };
 }
 
-float NormalizeAxis(float angle) {
-    while (angle >  180.f) angle -= 360.f;
-    while (angle < -180.f) angle += 360.f;
-    return angle;
+static float NormAxis(float a) {
+    while (a >  180.f) a -= 360.f;
+    while (a < -180.f) a += 360.f;
+    return a;
 }
 
 // ============================================================================
-// [2. TABLA DE LA VERDAD (Offsets v2.0 — Base 0)]
+// [2. SDK ANCHORS — TABLA DE LA VERDAD v2.0]
 // ============================================================================
 
-constexpr uintptr_t OFFSET_LOCAL_PLAYER      = 0x951788;
-constexpr uintptr_t OFFSET_GET_WEAPON_ID     = 0x4c546c;
-constexpr uintptr_t OFFSET_K2_GET_ACTOR_LOC  = 0x1b844c;
-constexpr uintptr_t OFFSET_ADD_YAW_INPUT     = 0x1e3294;
-constexpr uintptr_t OFFSET_ADD_PITCH_INPUT   = 0x1e33dc;
-constexpr uintptr_t OFFSET_PICK_TARGET       = 0x0b27f0;
-constexpr uintptr_t ADDRESS_STRING_DRAW_HUD  = 0x90cb2a;
-constexpr uintptr_t OFFSET_HEALTH_STATE      = 0x67c;
+// Anclas del motor
+constexpr uintptr_t ADDR_GUOBJECT_ARRAY   = 0x9515A0; // FUObjectArray
+constexpr uintptr_t ADDR_GWORLD           = 0x951770; // UWorld*
+constexpr uintptr_t VTABLE_PROCESS_EVENT  = 0x260;    // Índice en VTable
 
-constexpr uintptr_t OFFSET_CONTROL_ROTATION  = 0x2e8;
+// Funciones nativas
+constexpr uintptr_t OFF_GET_WEAPON_ID     = 0x4c546c;
+constexpr uintptr_t OFF_PICK_TARGET       = 0x0b27f0;
+constexpr uintptr_t OFF_K2_ACTOR_LOC      = 0x1b844c;
+constexpr uintptr_t OFF_ADD_YAW           = 0x1e3294;
+constexpr uintptr_t OFF_ADD_PITCH         = 0x1e33dc;
+constexpr uintptr_t ADDR_STR_DRAW_HUD    = 0x90cb2a;
 
-constexpr int       STATE_KNOCKED            = 0x92f92;
+// Offsets UObject/UWorld
+constexpr uintptr_t OFF_HEALTH_STATE      = 0x67c;
+constexpr uintptr_t OFF_CTRL_ROTATION     = 0x2e8;
+constexpr int       STATE_KNOCKED         = 0x92f92;
+
+// FUObjectArray layout (UE4 ARM64)
+constexpr uintptr_t OFF_OBJARRAY_DATA     = 0x10; // ObjObjects.Objects ptr
+constexpr uintptr_t OFF_OBJARRAY_NUM      = 0x18; // NumElements
+constexpr uintptr_t FUOBJECTITEM_SIZE     = 0x18; // sizeof(FUObjectItem)
+
+// GWorld → HUD path
+constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
+constexpr uintptr_t OFF_LOCAL_PLAYERS     = 0x38;
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
+constexpr uintptr_t OFF_HUD               = 0x2b0;
 
 #define IS_VALID_PTR(p) ((uintptr_t)(p) > 0x100000000ULL)
 
-inline uintptr_t getRealOffset(uintptr_t offset) {
-    return reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)) + offset;
+static inline uintptr_t BASE() {
+    return reinterpret_cast<uintptr_t>(_dyld_get_image_header(0));
+}
+static inline uintptr_t OFF(uintptr_t o) { return BASE() + o; }
+
+// ============================================================================
+// [3. ESTADO GLOBAL]
+// ============================================================================
+
+static bool g_Active = false;
+
+// ============================================================================
+// [4. SDK — GUObjectArray ITERATOR]
+// ============================================================================
+
+// Itera GUObjectArray y devuelve el primer UObject* cuya clase
+// contenga 'className' en su nombre (comparación por FName string offset).
+// Devuelve 0 si no encuentra.
+static uintptr_t FindObjectByClass(const char* className) {
+    uintptr_t arrayPtr = OFF(ADDR_GUOBJECT_ARRAY);
+    if (!IS_VALID_PTR(arrayPtr)) return 0;
+
+    uintptr_t gObjects = *reinterpret_cast<uintptr_t*>(arrayPtr);
+    if (!IS_VALID_PTR(gObjects)) return 0;
+
+    uintptr_t objData = *reinterpret_cast<uintptr_t*>(gObjects + OFF_OBJARRAY_DATA);
+    int32_t   numObjs = *reinterpret_cast<int32_t*>(gObjects + OFF_OBJARRAY_NUM);
+
+    if (!IS_VALID_PTR(objData) || numObjs <= 0 || numObjs > 500000) return 0;
+
+    for (int32_t i = 0; i < numObjs; i++) {
+        uintptr_t item   = objData + (uintptr_t)i * FUOBJECTITEM_SIZE;
+        uintptr_t uobj   = *reinterpret_cast<uintptr_t*>(item);
+        if (!IS_VALID_PTR(uobj)) continue;
+
+        // UObject: VTable(0x0), Flags(0x8), Index(0xC), Class*(0x10), Name.Index(0x18)
+        uintptr_t classPtr = *reinterpret_cast<uintptr_t*>(uobj + 0x10);
+        if (!IS_VALID_PTR(classPtr)) continue;
+
+        // UStruct->Name FName está en +0x18; el string real en GNames
+        // Usamos una búsqueda simple por puntero de clase cuya representación
+        // en string esté en la sección del binario — evitamos GNames que
+        // varía. En su lugar buscamos por instancia de clase específica.
+        (void)classPtr; // Reservado para extensión futura
+        (void)className;
+        break; // placeholder — ver función GWorld path abajo
+    }
+    return 0;
+}
+
+// Navegación por GWorld → GameInstance → LocalPlayers[0] → PlayerController → HUD
+static uintptr_t FindHUDViaGWorld() {
+    uintptr_t worldPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
+    if (!IS_VALID_PTR(worldPtr)) {
+        printf("[SDK] GWorld invalido.\n");
+        return 0;
+    }
+    printf("[SDK] GWorld: 0x%lX\n", worldPtr);
+
+    uintptr_t gameInst = *reinterpret_cast<uintptr_t*>(worldPtr + OFF_GAME_INSTANCE);
+    if (!IS_VALID_PTR(gameInst)) {
+        printf("[SDK] GameInstance invalido.\n");
+        return 0;
+    }
+
+    // LocalPlayers es un TArray — primer elemento
+    uintptr_t lpArray = *reinterpret_cast<uintptr_t*>(gameInst + OFF_LOCAL_PLAYERS);
+    if (!IS_VALID_PTR(lpArray)) {
+        printf("[SDK] LocalPlayers invalido.\n");
+        return 0;
+    }
+
+    uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(lpArray);
+    if (!IS_VALID_PTR(localPlayer)) {
+        printf("[SDK] LocalPlayer[0] invalido.\n");
+        return 0;
+    }
+    printf("[SDK] LocalPlayer: 0x%lX\n", localPlayer);
+
+    uintptr_t controller = *reinterpret_cast<uintptr_t*>(localPlayer + OFF_PLAYER_CTRL);
+    if (!IS_VALID_PTR(controller)) {
+        printf("[SDK] PlayerController invalido.\n");
+        return 0;
+    }
+    printf("[SDK] PlayerController: 0x%lX\n", controller);
+
+    uintptr_t hud = *reinterpret_cast<uintptr_t*>(controller + OFF_HUD);
+    if (!IS_VALID_PTR(hud)) {
+        printf("[SDK] HUD invalido.\n");
+        return 0;
+    }
+    printf("[SDK] HUD: 0x%lX\n", hud);
+
+    return hud;
 }
 
 // ============================================================================
-// [3. VARIABLES GLOBALES DE ESTADO]
-// ============================================================================
-
-bool g_SGLock_Active = false;
-
-// ============================================================================
-// [4. INTERFAZ GRÁFICA NATIVA (UI Master Switch)]
+// [5. INTERFAZ GRÁFICA NATIVA]
 // ============================================================================
 
 @interface SGLockButton : UIButton
 @end
 
 @implementation SGLockButton
-
-- (void)toggleState {
-    g_SGLock_Active = !g_SGLock_Active;
+- (void)toggle {
+    g_Active = !g_Active;
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc]
                                        initWithStyle:UIImpactFeedbackStyleMedium];
-    [gen prepare];
-    [gen impactOccurred];
-    self.backgroundColor = g_SGLock_Active ? [UIColor greenColor] : [UIColor redColor];
-    printf("[Tweak] SGLock is now %s\n", g_SGLock_Active ? "ENABLED" : "DISABLED");
+    [gen prepare]; [gen impactOccurred];
+    self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
+    printf("[Tweak] SGLock is now %s\n", g_Active ? "ENABLED" : "DISABLED");
 }
-
-- (void)dragged:(UIPanGestureRecognizer *)pan {
-    if (pan.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [pan translationInView:self.superview];
-        self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-        [pan setTranslation:CGPointZero inView:self.superview];
+- (void)pan:(UIPanGestureRecognizer*)r {
+    if (r.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [r translationInView:self.superview];
+        self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y);
+        [r setTranslation:CGPointZero inView:self.superview];
     }
 }
 @end
 
-void InjectMasterSwitchUI() {
+static void InjectUI() {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *mainWindow = nil;
-        for (UIWindow *w in [UIApplication sharedApplication].windows)
-            if (w.isKeyWindow) { mainWindow = w; break; }
-        if (!mainWindow) return;
+        UIWindow *win = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows)
+            if (w.isKeyWindow) { win = w; break; }
+        if (!win) return;
 
         SGLockButton *btn = [SGLockButton buttonWithType:UIButtonTypeCustom];
-        btn.frame              = CGRectMake(20, 100, 40, 40);
-        btn.layer.cornerRadius = 20;
-        btn.backgroundColor    = [UIColor redColor];
+        btn.frame = CGRectMake(20, 100, 44, 44);
+        btn.layer.cornerRadius = 22;
+        btn.backgroundColor    = UIColor.redColor;
         btn.layer.borderWidth  = 2;
-        btn.layer.borderColor  = [UIColor whiteColor].CGColor;
-        btn.clipsToBounds      = YES;
-        btn.alpha              = 0.85f;
-
-        [btn addTarget:btn action:@selector(toggleState) forControlEvents:UIControlEventTouchUpInside];
+        btn.layer.borderColor  = UIColor.whiteColor.CGColor;
+        btn.clipsToBounds = YES;
+        btn.alpha = 0.85f;
+        [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                                        initWithTarget:btn action:@selector(dragged:)];
+                                        initWithTarget:btn action:@selector(pan:)];
         [btn addGestureRecognizer:pan];
-        [mainWindow addSubview:btn];
+        [win addSubview:btn];
+        printf("[Tweak] UI Master Switch inyectada.\n");
     });
 }
 
 // ============================================================================
-// [5. FIRMAS DE FUNCIONES NATIVAS]
+// [6. FIRMAS NATIVAS]
 // ============================================================================
 
-int    (*GetWeaponID)(void*);
-uintptr_t (*PickTarget)(void*, void*, double);
-FVector   (*K2_GetActorLocation)(uintptr_t);
-void   (*AddControllerYawInput)(void*, float);
-void   (*AddControllerPitchInput)(void*, float);
+static int      (*GetWeaponID)(void*);
+static uintptr_t (*PickTarget)(void*, void*, double);
+static FVector   (*K2_GetActorLocation)(uintptr_t);
+static void     (*AddYaw)(void*, float);
+static void     (*AddPitch)(void*, float);
 
 // ============================================================================
-// [6. SYMBOL REBINDING (PAC-Safe — __DATA,__la_symbol_ptr)]
+// [7. SYMBOL REBINDING (PAC-Safe — __DATA,__la_symbol_ptr)]
 // ============================================================================
 
-// Nombre mangled de UObject::ProcessEvent(UFunction*, void*)
-static const char* kProcessEventSymbol = "_ZN7UObject12ProcessEventEP9UFunctionPv";
+static const char* kPESymbol = "_ZN7UObject12ProcessEventEP9UFunctionPv";
 
-void (*orig_ProcessEvent)(void* _this, void* function, void* parms) = nullptr;
+static void (*orig_PE)(void*, void*, void*) = nullptr;
 
-/**
- * @brief Itera sobre los segmentos __DATA del binario en búsqueda de la tabla
- *        de punteros de símbolos lazy (__la_symbol_ptr) o no-lazy (__nl_symbol_ptr)
- *        y reemplaza el puntero de 'symbolName' con 'newFunc'.
- *        Opera sobre memoria writable por defecto → No necesita mprotect → PAC-Safe.
- */
-bool RebindSymbol(const char* symbolName, void* newFunc, void** origFunc) {
-    const mach_header* mh = _dyld_get_image_header(0);
-    if (!mh) return false;
-
+static bool RebindProcessEvent(void* newFunc, void** origOut) {
+    const mach_header_64* mh = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(0));
     intptr_t slide = _dyld_get_image_vmaddr_slide(0);
 
-    // Obtener el encabezado (64-bit)
-    const mach_header_64* mh64 = reinterpret_cast<const mach_header_64*>(mh);
-    const load_command*   lc   = reinterpret_cast<const load_command*>(mh64 + 1);
+    const symtab_command*   symCmd  = nullptr;
+    const dysymtab_command* dsymCmd = nullptr;
 
-    // Rastrear tablas necesarias
-    const symtab_command*    symtab    = nullptr;
-    const dysymtab_command*  dysymtab  = nullptr;
-    const segment_command_64* dataSegment = nullptr;
+    const load_command* lc = reinterpret_cast<const load_command*>(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++,
+         lc = reinterpret_cast<const load_command*>((uint8_t*)lc + lc->cmdsize)) {
+        if (lc->cmd == LC_SYMTAB)   symCmd  = (symtab_command*)lc;
+        if (lc->cmd == LC_DYSYMTAB) dsymCmd = (dysymtab_command*)lc;
+    }
+    if (!symCmd || !dsymCmd) return false;
 
-    for (uint32_t i = 0; i < mh64->ncmds; i++, lc = reinterpret_cast<const load_command*>(
-            reinterpret_cast<const uint8_t*>(lc) + lc->cmdsize)) {
-        if (lc->cmd == LC_SYMTAB)
-            symtab = reinterpret_cast<const symtab_command*>(lc);
-        else if (lc->cmd == LC_DYSYMTAB)
-            dysymtab = reinterpret_cast<const dysymtab_command*>(lc);
-        else if (lc->cmd == LC_SEGMENT_64) {
-            const segment_command_64* seg = reinterpret_cast<const segment_command_64*>(lc);
-            if (strncmp(seg->segname, "__DATA", 6) == 0 ||
-                strncmp(seg->segname, "__DATA_CONST", 12) == 0)
-                dataSegment = seg;
+    const char*     strtab = (const char*)(slide + symCmd->stroff);
+    const nlist_64* nltab  = (const nlist_64*)(slide + symCmd->symoff);
+    const uint32_t* indir  = (const uint32_t*)(slide + dsymCmd->indirectsymoff);
+
+    lc = reinterpret_cast<const load_command*>(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++,
+         lc = reinterpret_cast<const load_command*>((uint8_t*)lc + lc->cmdsize)) {
+        if (lc->cmd != LC_SEGMENT_64) continue;
+        const segment_command_64* seg = (segment_command_64*)lc;
+        if (strncmp(seg->segname, "__DATA", 6) != 0 &&
+            strncmp(seg->segname, "__DATA_CONST", 12) != 0) continue;
+
+        const section_64* sect = (section_64*)(seg + 1);
+        for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+            uint8_t t = sect->flags & SECTION_TYPE;
+            if (t != S_LAZY_SYMBOL_POINTERS && t != S_NON_LAZY_SYMBOL_POINTERS) continue;
+
+            uint32_t    n     = (uint32_t)(sect->size / 8);
+            uintptr_t*  ptrs  = (uintptr_t*)(slide + sect->addr);
+
+            for (uint32_t k = 0; k < n; k++) {
+                uint32_t idx = indir[sect->reserved1 + k];
+                if (idx & (INDIRECT_SYMBOL_ABS | INDIRECT_SYMBOL_LOCAL)) continue;
+                if (idx >= symCmd->nsyms) continue;
+                if (strcmp(strtab + nltab[idx].n_un.n_strx, kPESymbol) != 0) continue;
+
+                if (origOut) *origOut = (void*)ptrs[k];
+                ptrs[k] = (uintptr_t)newFunc;
+                printf("[Tweak] Simbolo ProcessEvent re-enlazado correctamente (PAC-Safe).\n");
+                return true;
+            }
         }
     }
-
-    if (!symtab || !dysymtab || !dataSegment) return false;
-
-    // Puntero base a la tabla de strings y nlist
-    const char*          strtab = reinterpret_cast<const char*>(
-                                    slide + symtab->stroff);
-    const nlist_64*      nl     = reinterpret_cast<const nlist_64*>(
-                                    slide + symtab->symoff);
-    const uint32_t*      indirectSyms = reinterpret_cast<const uint32_t*>(
-                                    slide + dysymtab->indirectsymoff);
-
-    // Iterar secciones de __DATA buscando __la_symbol_ptr y __nl_symbol_ptr
-    const section_64* sect = reinterpret_cast<const section_64*>(dataSegment + 1);
-    for (uint32_t s = 0; s < dataSegment->nsects; s++, sect++) {
-        uint8_t type = sect->flags & SECTION_TYPE;
-        if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS)
-            continue;
-
-        uint32_t numPtrs = static_cast<uint32_t>(sect->size / sizeof(uintptr_t));
-        uintptr_t* ptrTable = reinterpret_cast<uintptr_t*>(slide + sect->addr);
-
-        for (uint32_t idx = 0; idx < numPtrs; idx++) {
-            uint32_t symIdx = indirectSyms[sect->reserved1 + idx];
-            if (symIdx & (INDIRECT_SYMBOL_ABS | INDIRECT_SYMBOL_LOCAL)) continue;
-            if (symIdx >= symtab->nsyms) continue;
-
-            const char* name = strtab + nl[symIdx].n_un.n_strx;
-            if (strcmp(name, symbolName) != 0) continue;
-
-            // Encontrado — reemplazar el puntero
-            if (origFunc) *origFunc = reinterpret_cast<void*>(ptrTable[idx]);
-            ptrTable[idx] = reinterpret_cast<uintptr_t>(newFunc);
-
-            printf("[Tweak] Simbolo ProcessEvent re-enlazado correctamente (PAC-Safe).\n");
-            return true;
-        }
-    }
-
-    printf("[Tweak] Simbolo '%s' no encontrado en __DATA.\n", symbolName);
+    printf("[LOG] Simbolo ProcessEvent no encontrado en __DATA. El juego lo enlaza estaticamente.\n");
     return false;
 }
 
 // ============================================================================
-// [7. PROCESSEVENT HOOK — NÚCLEO DEL AIMLOCK PERSISTENTE]
+// [8. HOOK DE PROCESSEVENT — AIMLOCK PERSISTENTE]
 // ============================================================================
 
-void hooked_ProcessEvent(void* _this, void* function, void* parms) {
-    // 1. Master Switch — Coste cero si está apagado
-    if (!g_SGLock_Active) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
+static void hooked_PE(void* _this, void* func, void* parms) {
+    // Regla de Oro
+    if (!g_Active || !_this || !func) {
+        if (orig_PE) orig_PE(_this, func, parms);
         return;
     }
 
-    // 2. Seguridad Anti-Crash
-    if (!_this || !function) {
-        if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
+    // Resolver evento ReceiveDrawHUD
+    char* drawHUDStr = (char*)OFF(ADDR_STR_DRAW_HUD);
+    if (!IS_VALID_PTR(drawHUDStr) || memcmp(func, drawHUDStr, 34) != 0) {
+        if (orig_PE) orig_PE(_this, func, parms);
         return;
     }
 
-    // 3. Resolución del evento ReceiveDrawHUD
-    char* targetStr = reinterpret_cast<char*>(getRealOffset(ADDRESS_STRING_DRAW_HUD));
-    bool isDrawHUD = IS_VALID_PTR(targetStr) && (memcmp(function, targetStr, 34) == 0);
+    // Navegar GWorld → HUD → PlayerController
+    uintptr_t world = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
+    if (!IS_VALID_PTR(world)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-    if (isDrawHUD) {
-        uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-        if (IS_VALID_PTR(localPlayerBase)) {
-            uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
+    uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
+    if (!IS_VALID_PTR(gi)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-            if (IS_VALID_PTR(localPlayer)) {
-                // _this en este contexto es el PlayerController
-                uintptr_t playerController = reinterpret_cast<uintptr_t>(_this);
+    uintptr_t lpArr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
+    if (!IS_VALID_PTR(lpArr)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                // 4. Filtro de Arma
-                int weaponID = GetWeaponID(reinterpret_cast<void*>(localPlayer));
-                bool isShotgun = (((weaponID - 0x19641) < 4) || (weaponID == 0x196a5));
+    uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpArr);
+    if (!IS_VALID_PTR(lp)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                if (isShotgun) {
-                    // 5. Buscar Objetivo
-                    uint8_t p1[16] = {0}, p2[16] = {0};
-                    uintptr_t enemy = PickTarget(p1, p2, 0.0);
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lp + OFF_PLAYER_CTRL);
+    if (!IS_VALID_PTR(ctrl)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                    if (IS_VALID_PTR(enemy)) {
-                        int healthState = *reinterpret_cast<int*>(enemy + OFFSET_HEALTH_STATE);
-                        if (healthState != STATE_KNOCKED) {
+    // Filtro de Arma
+    int wid = GetWeaponID((void*)lp);
+    bool isShotgun = (((wid - 0x19641) < 4) || (wid == 0x196a5));
+    if (!isShotgun) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                            // 6. Cálculo de dirección
-                            FVector localPos = K2_GetActorLocation(localPlayer);
-                            FVector enemyPos = K2_GetActorLocation(enemy);
-                            FRotator target  = VectorToRotator(enemyPos - localPos);
+    // Buscar Objetivo
+    uint8_t p1[16]={}, p2[16]={};
+    uintptr_t enemy = PickTarget(p1, p2, 0.0);
+    if (!IS_VALID_PTR(enemy)) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                            FRotator current = *reinterpret_cast<FRotator*>(
-                                                  playerController + OFFSET_CONTROL_ROTATION);
+    int hpState = *reinterpret_cast<int*>(enemy + OFF_HEALTH_STATE);
+    if (hpState == STATE_KNOCKED) { if (orig_PE) orig_PE(_this, func, parms); return; }
 
-                            float dYaw   = NormalizeAxis(target.Yaw   - current.Yaw);
-                            float dPitch = NormalizeAxis(target.Pitch - current.Pitch);
+    // Cálculo de Rotación
+    FVector myPos  = K2_GetActorLocation(lp);
+    FVector enPos  = K2_GetActorLocation(enemy);
+    FRotator tgt   = VecToRot(enPos - myPos);
+    FRotator cur   = *reinterpret_cast<FRotator*>(ctrl + OFF_CTRL_ROTATION);
 
-                            // 7. Input nativo suavizado
-                            constexpr float smoothing = 0.5f;
-                            if (AddControllerYawInput && AddControllerPitchInput) {
-                                AddControllerYawInput(reinterpret_cast<void*>(playerController),
-                                                      dYaw * smoothing);
-                                AddControllerPitchInput(reinterpret_cast<void*>(playerController),
-                                                        dPitch * smoothing);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    float dY = NormAxis(tgt.Yaw   - cur.Yaw);
+    float dP = NormAxis(tgt.Pitch - cur.Pitch);
+
+    constexpr float SMOOTH = 0.5f;
+    if (AddYaw && AddPitch) {
+        AddYaw  ((void*)ctrl, dY * SMOOTH);
+        AddPitch((void*)ctrl, dP * SMOOTH);
     }
 
-    if (orig_ProcessEvent) orig_ProcessEvent(_this, function, parms);
+    if (orig_PE) orig_PE(_this, func, parms);
 }
 
 // ============================================================================
-// [8. PROTOCOLO DE ESTABILIDAD JAILED (QUAD-LOCK + SYMBOL REBINDING)]
+// [9. PROTOCOLO DE ESTABILIDAD JAILED (QUAD-LOCK)]
 // ============================================================================
 
-void BackgroundInjectionThread() {
-    printf("[LOG] Base Address: 0x%lX\n", reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)));
+static void InjectionThread() {
+    printf("[LOG] SGLock iniciado. Base: 0x%lX\n", BASE());
 
-    // --- FASE 1: Delay inicial 10s → Inyección de UI ---
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    // FASE 1 — 15s delay absoluto
+    std::this_thread::sleep_for(std::chrono::seconds(15));
 
-    InjectMasterSwitchUI();
-    printf("[LOG] UI inyectada. Esperando 5s para el hook...\n");
+    // Resolver funciones nativas
+    GetWeaponID         = (int(*)(void*))          OFF(OFF_GET_WEAPON_ID);
+    PickTarget          = (uintptr_t(*)(void*,void*,double)) OFF(OFF_PICK_TARGET);
+    K2_GetActorLocation = (FVector(*)(uintptr_t))  OFF(OFF_K2_ACTOR_LOC);
+    AddYaw              = (void(*)(void*,float))   OFF(OFF_ADD_YAW);
+    AddPitch            = (void(*)(void*,float))   OFF(OFF_ADD_PITCH);
 
-    // --- FASE 2: Delay adicional 5s → Symbol Rebinding ---
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    // FASE 2 — UI en main thread (siempre)
+    InjectUI();
 
-    // Resolver funciones nativas del binario
-    GetWeaponID        = reinterpret_cast<int (*)(void*)>(getRealOffset(OFFSET_GET_WEAPON_ID));
-    PickTarget         = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(OFFSET_PICK_TARGET));
-    K2_GetActorLocation= reinterpret_cast<FVector (*)(uintptr_t)>(getRealOffset(OFFSET_K2_GET_ACTOR_LOC));
-    AddControllerYawInput   = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_YAW_INPUT));
-    AddControllerPitchInput = reinterpret_cast<void (*)(void*, float)>(getRealOffset(OFFSET_ADD_PITCH_INPUT));
+    // FASE 3 — Symbol Rebinding PAC-Safe sobre __DATA
+    bool hooked = RebindProcessEvent((void*)hooked_PE, (void**)&orig_PE);
 
-    // Aplicar Symbol Rebinding sobre __DATA (PAC-Safe, no requiere mprotect)
-    bool ok = RebindSymbol(kProcessEventSymbol,
-                           reinterpret_cast<void*>(hooked_ProcessEvent),
-                           reinterpret_cast<void**>(&orig_ProcessEvent));
+    if (!hooked) {
+        // Fallback: buscar HUD via GWorld e intentar VTable instance swap
+        printf("[LOG] Intentando VTable swap via GWorld...\n");
+        int retries = 0;
+        while (retries++ < 30) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            uintptr_t hud = FindHUDViaGWorld();
+            if (!IS_VALID_PTR(hud)) continue;
 
-    if (!ok) {
-        printf("[LOG] Rebinding fallido. El simbolo no existe en la tabla de importaciones.\n");
-        printf("[LOG] Verifica que el juego enlaza ProcessEvent dinamicamente.\n");
+            // Shadow VTable (Heap clone — no mprotect)
+            uintptr_t* origVT = *reinterpret_cast<uintptr_t**>(hud);
+            if (!IS_VALID_PTR(origVT)) continue;
+
+            int idx = VTABLE_PROCESS_EVENT / sizeof(uintptr_t);
+            uintptr_t* shadow = new uintptr_t[400];
+            memcpy(shadow, origVT, 400 * sizeof(uintptr_t));
+
+            orig_PE = (void(*)(void*,void*,void*))origVT[idx];
+            shadow[idx] = (uintptr_t)hooked_PE;
+            *reinterpret_cast<uintptr_t**>(hud) = shadow;
+
+            printf("[LOG] VTable Shadow Hook aplicado en HUD via GWorld.\n");
+            break;
+        }
     }
 }
 
 __attribute__((constructor))
-static void init_tweak() {
+static void init() {
     if (!_dyld_get_image_header(0)) return;
-    std::thread(BackgroundInjectionThread).detach();
+    std::thread(InjectionThread).detach();
 }
