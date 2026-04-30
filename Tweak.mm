@@ -82,40 +82,6 @@ static bool g_Active = false;
 // [4. SDK — GUObjectArray ITERATOR]
 // ============================================================================
 
-// Itera GUObjectArray y devuelve el primer UObject* cuya clase
-// contenga 'className' en su nombre (comparación por FName string offset).
-// Devuelve 0 si no encuentra.
-static uintptr_t FindObjectByClass(const char* className) {
-    uintptr_t arrayPtr = OFF(ADDR_GUOBJECT_ARRAY);
-    if (!IS_VALID_PTR(arrayPtr)) return 0;
-
-    uintptr_t gObjects = *reinterpret_cast<uintptr_t*>(arrayPtr);
-    if (!IS_VALID_PTR(gObjects)) return 0;
-
-    uintptr_t objData = *reinterpret_cast<uintptr_t*>(gObjects + OFF_OBJARRAY_DATA);
-    int32_t   numObjs = *reinterpret_cast<int32_t*>(gObjects + OFF_OBJARRAY_NUM);
-
-    if (!IS_VALID_PTR(objData) || numObjs <= 0 || numObjs > 500000) return 0;
-
-    for (int32_t i = 0; i < numObjs; i++) {
-        uintptr_t item   = objData + (uintptr_t)i * FUOBJECTITEM_SIZE;
-        uintptr_t uobj   = *reinterpret_cast<uintptr_t*>(item);
-        if (!IS_VALID_PTR(uobj)) continue;
-
-        // UObject: VTable(0x0), Flags(0x8), Index(0xC), Class*(0x10), Name.Index(0x18)
-        uintptr_t classPtr = *reinterpret_cast<uintptr_t*>(uobj + 0x10);
-        if (!IS_VALID_PTR(classPtr)) continue;
-
-        // UStruct->Name FName está en +0x18; el string real en GNames
-        // Usamos una búsqueda simple por puntero de clase cuya representación
-        // en string esté en la sección del binario — evitamos GNames que
-        // varía. En su lugar buscamos por instancia de clase específica.
-        (void)classPtr; // Reservado para extensión futura
-        (void)className;
-        break; // placeholder — ver función GWorld path abajo
-    }
-    return 0;
-}
 
 // Navegación por GWorld → GameInstance → LocalPlayers[0] → PlayerController → HUD
 static uintptr_t FindHUDViaGWorld() {
