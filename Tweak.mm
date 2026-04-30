@@ -29,7 +29,7 @@ struct FRotator {
 // [2. OFFSETS NATIVOS FINALIZADOS (Direcciones Base 0)]
 // ============================================================================
 
-constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0x951788; 
+constexpr uintptr_t OFFSET_LOCAL_PLAYER       = 0xdb8; // Validado por el autor
 constexpr uintptr_t OFFSET_WEAPON_ID_FUNC     = 0x4c546c;
 constexpr uintptr_t OFFSET_TARGET_SELECTOR    = 0x91e8;
 constexpr uintptr_t OFFSET_ACTOR_LOCATION     = 0x1b844c;
@@ -50,6 +50,8 @@ constexpr uintptr_t OFFSET_PLAYER_CONTROLLER  = 0x30;
 constexpr uintptr_t OFFSET_HUD                = 0x2b0;    
 constexpr uintptr_t OFFSET_HEALTH_STATE       = 0x67c;
 constexpr int       STATE_KNOCKED             = 0x92f92;
+
+#define IS_VALID_PTR(p) ((uintptr_t)(p) > 0x100000000)
 
 inline uintptr_t getRealOffset(uintptr_t offset) {
     return reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)) + offset;
@@ -203,16 +205,16 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
     }
 
     if (isDrawHUD) {
-        // Validación de PlayerController vía param_4
+        // Validación de Estructuras 
         uintptr_t playerController = *reinterpret_cast<uintptr_t*>((uintptr_t)hud + OFFSET_PLAYER_CONTROLLER);
-        if (playerController) {
+        if (IS_VALID_PTR(playerController)) {
             
             uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-            if (localPlayerBase) {
+            if (IS_VALID_PTR(localPlayerBase)) {
                 uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
 
-                // Anti-Crash: Validación estricta, no ejecutar si el jugador no ha cargado en el mapa
-                if (localPlayer != 0) {
+                // Anti-Crash: No ejecutar si el jugador es nulo (Ej. En menú principal o cargando mapa)
+                if (IS_VALID_PTR(localPlayer)) {
                     
                     int currentWeaponID = GetWeaponID(reinterpret_cast<void*>(localPlayer));
                     
@@ -265,6 +267,9 @@ void hooked_ProcessEvent(void* _this, void* function, void* parms, void* hud) {
 void BackgroundInjectionThread() {
     printf("[LOG] Base Address encontrada: 0x%lX\n", reinterpret_cast<uintptr_t>(_dyld_get_image_header(0)));
     
+    // Retraso masivo de 15 segundos para asegurar que el Menú y Motor están 100% estables
+    std::this_thread::sleep_for(std::chrono::seconds(15));
+    
     GetWeaponID = reinterpret_cast<int (*)(void*)>(getRealOffset(OFFSET_WEAPON_ID_FUNC));
     GetTargetForAimBotByFOV = reinterpret_cast<uintptr_t (*)(void*, void*, double)>(getRealOffset(OFFSET_TARGET_SELECTOR));
     Conv_VectorToRotator = reinterpret_cast<FRotator (*)(FVector)>(getRealOffset(OFFSET_VECTOR_TO_ROTATOR));
@@ -281,21 +286,15 @@ void BackgroundInjectionThread() {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
         uintptr_t localPlayerBase = getRealOffset(OFFSET_LOCAL_PLAYER);
-        if (!localPlayerBase) continue;
+        if (!IS_VALID_PTR(localPlayerBase)) continue;
         
         uintptr_t localPlayer = *reinterpret_cast<uintptr_t*>(localPlayerBase);
-        if (localPlayer) {
-            
-            // Safe Start: Inyectar UI solo cuando el juego haya cargado el mundo físico
-            if (!uiInjected) {
-                InjectMasterSwitchUI();
-                uiInjected = true;
-            }
+        if (IS_VALID_PTR(localPlayer)) {
             
             uintptr_t playerController = *reinterpret_cast<uintptr_t*>(localPlayer + OFFSET_PLAYER_CONTROLLER); 
-            if (playerController) {
+            if (IS_VALID_PTR(playerController)) {
                 uintptr_t hudInstance = *reinterpret_cast<uintptr_t*>(playerController + OFFSET_HUD); 
-                if (hudInstance) {
+                if (IS_VALID_PTR(hudInstance)) {
                     
                     hookApplied = ApplyVTableHookByByteOffset(reinterpret_cast<void*>(hudInstance), 
                                                               OFFSET_PROCESS_EVENT, 
@@ -304,6 +303,13 @@ void BackgroundInjectionThread() {
                                                   
                     if (hookApplied) {
                         printf("[LOG] Intentando VTable Swap en ProcessEvent (HUD). Exito!\n");
+                        
+                        // Safe Start Extremo: Inyectar UI únicamente después de que el hook sea exitoso
+                        // Esto garantiza que el HUD existe y estamos físicamente en una partida
+                        if (!uiInjected) {
+                            InjectMasterSwitchUI();
+                            uiInjected = true;
+                        }
                     }
                 }
             }
