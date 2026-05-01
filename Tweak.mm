@@ -1,13 +1,11 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <mach-o/dyld.h>
-#include <mach-o/getsect.h>
 #include <stdint.h>
 #include <cmath>
 #include <thread>
 #include <chrono>
 #include <cstring>
-#include <vector>
 
 // ============================================================================
 // [1. ESTRUCTURAS MATEMÁTICAS]
@@ -22,7 +20,7 @@ struct FVector {
 
 struct FRotator { float Pitch, Yaw, Roll; };
 
-__attribute__((unused)) static FRotator VecToRot(FVector d) {
+static FRotator VecToRot(FVector d) {
     float radToDeg = 180.f / (float)M_PI;
     return {
         atan2f(d.Z, sqrtf(d.X*d.X + d.Y*d.Y)) * radToDeg,
@@ -32,116 +30,154 @@ __attribute__((unused)) static FRotator VecToRot(FVector d) {
 }
 
 // ============================================================================
-// [2. PATTERN SCANNER (AOB SCAN) — BYPASS PROTECCIONES]
+// [2. SISTEMA DE LOCALIZACIÓN DE BINARIO (BYPASS ASLR)]
 // ============================================================================
 
-__attribute__((unused)) static uintptr_t FindPattern(uintptr_t start, uintptr_t size, const char* pattern, const char* mask) {
-    size_t patternLen = strlen(mask);
-    for (uintptr_t i = 0; i < size - patternLen; i++) {
-        bool found = true;
-        for (size_t j = 0; j < patternLen; j++) {
-            if (mask[j] != '?' && ((uint8_t*)pattern)[j] != ((uint8_t*)(start + i))[j]) {
-                found = false;
-                break;
-            }
-        }
-        if (found) return start + i;
-    }
-    return 0;
-}
-
 static uintptr_t g_BaseAddress = 0;
-static uintptr_t g_DataStart = 0;
-static uintptr_t g_DataSize = 0;
 
-static void InitializeMemoryInfo() {
+static void InitializeBase() {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char* name = _dyld_get_image_name(i);
         if (name && strstr(name, "ShadowTrackerExtra")) {
             g_BaseAddress = (uintptr_t)_dyld_get_image_header(i);
-            
-            // Obtener segmento __DATA para escaneo
-            unsigned long size = 0;
-            g_DataStart = (uintptr_t)getsectiondata((const struct mach_header_64*)g_BaseAddress, "__DATA", "__data", &size);
-            g_DataSize = (uintptr_t)size;
-            
-            NSLog(@"[SGLOCK] Base: 0x%lX | DATA: 0x%lX (Size: 0x%lX)", g_BaseAddress, g_DataStart, g_DataSize);
             return;
         }
     }
+    g_BaseAddress = (uintptr_t)_dyld_get_image_header(0);
 }
 
+static inline uintptr_t OFF(uintptr_t o) { return g_BaseAddress + o; }
+
 // ============================================================================
-// [3. TRUTH TABLE v13.0 — PATTERNS & NATIVE FUNCTIONS]
+// [3. TRUTH TABLE v14.0 — INDEXACIÓN GOBJECTS]
 // ============================================================================
 
-static uintptr_t g_WorldPtr = 0;
+constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; 
+constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; 
+constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788;
 
-// Offsets de Funciones (Offsets v2.0 confirmados)
-constexpr uintptr_t OFF_ADD_YAW   = 0x1e3294;
-constexpr uintptr_t OFF_ADD_PITCH = 0x1e33dc;
-constexpr uintptr_t OFF_PICK_TARGET = 0x0b27f0;
+// Jerarquía Unreal Engine
+constexpr uintptr_t OFF_PersistentLevel   = 0x30;
+constexpr uintptr_t OFF_ActorsArray       = 0x98;
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
+constexpr uintptr_t OFF_Pawn              = 0x3d0;
+constexpr uintptr_t OFF_RootComp          = 0x130;
+constexpr uintptr_t OFF_RelativeLoc       = 0x11c;
+constexpr uintptr_t OFF_CurrentWeapon     = 0x7a8; // Player -> Weapon
+constexpr uintptr_t OFF_WeaponID          = 0xcc;  // Weapon -> ID
 
-typedef void (*AddInput_t)(void*, float);
-static AddInput_t AddYaw = NULL;
-static AddInput_t AddPitch = NULL;
-
-#define IS_SAFE_PTR(p)     ((uintptr_t)(p) > 0x100000000ULL && ((uintptr_t)(p) & 0x7) == 0)
+#define IS_VALID_PTR(p)    ((uintptr_t)(p) > 0x100000000ULL)
+#define IS_SAFE_PTR(p)     (IS_VALID_PTR(p) && (((uintptr_t)(p) & 0x7) == 0))
 
 static bool g_Active = false;
+static uintptr_t g_CachedWorld = 0;
 
 // ============================================================================
-// [4. LÓGICA DE AIMLOCK (AOB + NATIVE)]
+// [4. LÓGICA DE AIMLOCK (INDEXACIÓN DIRECTA)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
-    if (doLog) NSLog(@"[SGLOCK] Heartbeat v13.0");
-    if (!g_Active) return;
+    if (!g_Active) {
+        g_CachedWorld = 0; // Resetear para evitar IOSurface overhead
+        return;
+    }
 
-    // ── Paso 1: Escaneo de GWorld (Si no se ha encontrado) ──────────────────
-    if (!g_WorldPtr) {
-        // Patrón genérico de GWorld (Ajustado para UE4 ARM64)
-        
-        // Como fallback, usamos el offset de GUObjectArray + 0x10 que pide el usuario
-        uintptr_t gObjectsAddr = g_BaseAddress + 0x951778;
-        uintptr_t objects = *reinterpret_cast<uintptr_t*>(gObjectsAddr + 0x10);
-        
-        if (IS_SAFE_PTR(objects)) {
-            g_WorldPtr = gObjectsAddr; // Usamos el ancla de GObjects como base
-            if (doLog) NSLog(@"[SGLOCK] SDK Inicializado via GObjects (0x951778)");
+    if (doLog) NSLog(@"[SGLOCK] Buscando Mundo en GObjects...");
+
+    // ── Paso 1: Localizar GWorld via Heurística en GObjects ──────────────────
+    if (!IS_SAFE_PTR(g_CachedWorld)) {
+        uintptr_t gObjectsBase = OFF(ADDR_GOBJECTS);
+        uintptr_t objects = *reinterpret_cast<uintptr_t*>(gObjectsBase + 0x10);
+        int numObjects = *reinterpret_cast<int*>(gObjectsBase + 0x18);
+
+        if (IS_SAFE_PTR(objects) && numObjects > 0) {
+            for (int i = 0; i < 20000 && i < numObjects; i++) {
+                uintptr_t obj = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
+                if (!IS_SAFE_PTR(obj)) continue;
+
+                // Un World suele tener un PersistentLevel válido en 0x30
+                uintptr_t level = *reinterpret_cast<uintptr_t*>(obj + OFF_PersistentLevel);
+                if (IS_SAFE_PTR(level)) {
+                    uintptr_t actors = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
+                    if (IS_SAFE_PTR(actors)) {
+                        g_CachedWorld = obj;
+                        NSLog(@"[SGLOCK] Mundo encontrado en indice: %d | Direccion: %p", i, (void*)g_CachedWorld);
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    if (!IS_SAFE_PTR(g_WorldPtr)) return;
+    if (!IS_SAFE_PTR(g_CachedWorld)) return;
 
-    // ── Paso 2: Obtener Jugador desde 0x951788 (Confirmado en Ghidra) ───────
-    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(g_BaseAddress + 0x951788);
+    // ── Paso 2: Obtener Jugador y Controller ────────────────────────────────
+    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
     if (!IS_SAFE_PTR(lpPtr)) return;
 
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + 0x30);
+    // Filtro de Escopeta (Lectura Directa 0xcc)
+    uintptr_t weapon = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_CurrentWeapon);
+    if (IS_SAFE_PTR(weapon)) {
+        int wid = *reinterpret_cast<int*>(weapon + OFF_WeaponID);
+        bool isShotgun = (((wid - 0x19641) < 4) || (wid == 0x196a5));
+        if (!isShotgun) return;
+    } else {
+        return; // Sin arma equipada
+    }
+
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
     if (!IS_SAFE_PTR(ctrl)) return;
 
-    // ── Paso 3: Buscar Objetivo (Invocación Directa) ────────────────────────
-    uint8_t p1[16] = {}, p2[16] = {};
-    uintptr_t (*PickTarget_f)(void*, void*, double) = (uintptr_t(*)(void*, void*, double))(g_BaseAddress + OFF_PICK_TARGET);
-    uintptr_t enemy = PickTarget_f(p1, p2, 90.0);
+    uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
+    if (!IS_SAFE_PTR(myPawn)) return;
+
+    // ── Paso 3: Escaneo de Actores ──────────────────────────────────────────
+    uintptr_t level = *reinterpret_cast<uintptr_t*>(g_CachedWorld + OFF_PersistentLevel);
+    uintptr_t actorsData = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
+    int actorsCount = *reinterpret_cast<int*>(level + OFF_ActorsArray + 0x8);
     
-    if (IS_SAFE_PTR(enemy)) {
-        if (doLog) NSLog(@"[SGLOCK] Enemigo encontrado: %p", (void*)enemy);
-        
-        // ── Paso 4: Movimiento de Mira (AddControllerInput) ─────────────────
-        if (AddYaw && AddPitch) {
-            // Cálculo simplificado de Delta (Requiere Posiciones)
-            // Para v13.0 simplificamos el llamado para verificar estabilidad
-            AddYaw  (reinterpret_cast<void*>(ctrl), 1.0f); // Test de movimiento
-            AddPitch(reinterpret_cast<void*>(ctrl), 0.0f);
+    if (!IS_SAFE_PTR(actorsData) || actorsCount <= 0) return;
+
+    uintptr_t myRoot = *reinterpret_cast<uintptr_t*>(myPawn + OFF_RootComp);
+    FVector myPos = *reinterpret_cast<FVector*>(myRoot + OFF_RelativeLoc);
+
+    uintptr_t bestEnemy = 0;
+    float minDist = 999999.0f;
+
+    for (int i = 0; i < actorsCount && i < 2000; i++) {
+        uintptr_t actor = *reinterpret_cast<uintptr_t*>(actorsData + (i * 8));
+        if (!IS_SAFE_PTR(actor) || actor == myPawn) continue;
+
+        uintptr_t root = *reinterpret_cast<uintptr_t*>(actor + OFF_RootComp);
+        if (!IS_SAFE_PTR(root)) continue;
+
+        FVector enPos = *reinterpret_cast<FVector*>(root + OFF_RelativeLoc);
+        float d = myPos.Dist(enPos);
+        if (d > 500.0f && d < 40000.0f && d < minDist) {
+            minDist = d;
+            bestEnemy = actor;
+        }
+    }
+
+    if (!IS_SAFE_PTR(bestEnemy)) return;
+
+    // ── Paso 4: Escritura de Rotación (PAC-SAFE) ────────────────────────────
+    FVector enPos = *reinterpret_cast<FVector*>(*reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp) + OFF_RelativeLoc);
+    FRotator tgtRot = VecToRot({enPos.X - myPos.X, enPos.Y - myPos.Y, enPos.Z - myPos.Z});
+
+    uintptr_t dynamicRotOffset = *reinterpret_cast<uintptr_t*>(OFF(ADDR_ROT_BASE_OFF));
+    if (dynamicRotOffset > 0 && dynamicRotOffset < 0x2000) {
+        uintptr_t rotAddr = ctrl + dynamicRotOffset;
+        if (IS_SAFE_PTR(rotAddr)) {
+            *reinterpret_cast<FRotator*>(rotAddr) = tgtRot;
+            if (doLog) NSLog(@"[SGLOCK] Lock Aplicado! Dist: %.0f", minDist / 100.0f);
         }
     }
 }
 
 // ============================================================================
-// [5. INTERFAZ Y INICIALIZACIÓN]
+// [5. INTERFAZ Y DRIVER (NSTimer)]
 // ============================================================================
 
 @interface SGLockButton : UIButton
@@ -150,13 +186,15 @@ static void AimlockTick(bool doLog) {
 - (void)toggle {
     g_Active = !g_Active;
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
+    NSLog(@"[SGLOCK] Toggle: %d", g_Active);
 }
 @end
 
+static int g_LogCounter = 0;
 static void TimerTick(NSTimer *timer) {
-    static int counter = 0;
-    AimlockTick(++counter >= 20);
-    if (counter >= 20) counter = 0;
+    bool doLog = (++g_LogCounter >= 40); // Log cada 2 segundos
+    if (doLog) g_LogCounter = 0;
+    AimlockTick(doLog);
 }
 
 static void InjectUI() {
@@ -172,19 +210,15 @@ static void InjectUI() {
         [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [win addSubview:btn];
 
-        [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *t){ TimerTick(t); }];
-        NSLog(@"[SGLOCK] v13.0 UI + Timer Online.");
+        NSTimer *timer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *t){ TimerTick(t); }];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+        NSLog(@"[SGLOCK] v14.0 UI + Timer Online.");
     });
 }
 
 __attribute__((constructor))
 static void init() {
-    InitializeMemoryInfo();
-    
-    // Resolver funciones nativas
-    AddYaw   = (AddInput_t)(g_BaseAddress + OFF_ADD_YAW);
-    AddPitch = (AddInput_t)(g_BaseAddress + OFF_ADD_PITCH);
-
+    InitializeBase();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         InjectUI();
     });
