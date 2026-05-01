@@ -30,34 +30,40 @@ static FRotator VecToRot(FVector d) {
 }
 
 // ============================================================================
-// [2. SISTEMA DE LOCALIZACIÓN DE BINARIO (BYPASS ASLR)]
+// [2. SISTEMA DE LOCALIZACIÓN DE BINARIO (BYPASS ASLR v12.0)]
 // ============================================================================
 
 static uintptr_t g_BaseAddress = 0;
 
-static uintptr_t GetBaseAddress() {
+static void InitializeBase() {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char* name = _dyld_get_image_name(i);
         if (name && strstr(name, "ShadowTrackerExtra")) {
-            return (uintptr_t)_dyld_get_image_header(i);
+            // Jailed-Safe: Slide + Preferred Base (0x100000000)
+            g_BaseAddress = (uintptr_t)_dyld_get_image_header(i);
+            
+            // Verificación de Magic Number
+            uint32_t magic = *reinterpret_cast<uint32_t*>(g_BaseAddress);
+            NSLog(@"[SGLOCK] Binario: %s", name);
+            NSLog(@"[SGLOCK] Base: 0x%lX | Magic: 0x%X (0xFEEDFACF?)", g_BaseAddress, magic);
+            return;
         }
     }
-    return (uintptr_t)_dyld_get_image_header(0);
+    g_BaseAddress = (uintptr_t)_dyld_get_image_header(0);
 }
 
 static inline uintptr_t OFF(uintptr_t o) { return g_BaseAddress + o; }
 
 // ============================================================================
-// [3. TRUTH TABLE v10.1 — TELEMETRÍA DE DIAGNÓSTICO]
+// [3. TRUTH TABLE v12.0 — PUNTEROS REALES]
 // ============================================================================
 
-constexpr uintptr_t ADDR_GWORLD           = 0x951770;
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; 
-constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; 
-constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; 
+constexpr uintptr_t ADDR_GEWORLD           = 0x951768; // Puntero real _GEWorld
+constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer
+constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
 
-// Offsets Estándar
+// Jerarquía
 constexpr uintptr_t OFF_PersistentLevel   = 0x30;
 constexpr uintptr_t OFF_ActorsArray       = 0x98;
 constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
@@ -71,50 +77,36 @@ constexpr uintptr_t OFF_RelativeLoc       = 0x11c;
 static bool g_Active = false;
 
 // ============================================================================
-// [4. LÓGICA DE AIMLOCK (MODO DIAGNÓSTICO RUIDOSO)]
+// [4. LÓGICA DE AIMLOCK (LECTURA DESREFERENCIADA)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
-    if (doLog) NSLog(@"[SGLOCK] Heartbeat - Ciclo vivo. Toggle: %d", g_Active);
+    if (doLog) NSLog(@"[SGLOCK] Heartbeat v12.0");
     if (!g_Active) return;
 
-    // ── Paso 1: Diagnóstico de GObjects ─────────────────────────────────────
-    uintptr_t gObjectsBase = OFF(ADDR_GOBJECTS);
-    if (doLog) NSLog(@"[SGLOCK] Leyendo GObjects en Base + 0x%lX...", ADDR_GOBJECTS);
+    // ── Paso 1: Leer VALOR del puntero GEWorld ──────────────────────────────
+    uintptr_t worldPtrAddr = OFF(ADDR_GEWORLD);
+    uintptr_t realWorld = *reinterpret_cast<uintptr_t*>(worldPtrAddr);
     
-    uintptr_t objects = *reinterpret_cast<uintptr_t*>(gObjectsBase + 0x10);
-    int numObjects = *reinterpret_cast<int*>(gObjectsBase + 0x18);
-    if (doLog) NSLog(@"[SGLOCK] GObjects -> %p | Num: %d", (void*)objects, numObjects);
+    if (doLog) NSLog(@"[SGLOCK] realWorld (en 0x%lX) -> %p", worldPtrAddr, (void*)realWorld);
+    if (!IS_SAFE_PTR(realWorld)) return;
 
-    if (IS_SAFE_PTR(objects) && numObjects > 10 && doLog) {
-        for (int i = 0; i < 10; i++) {
-            uintptr_t obj = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
-            if (IS_SAFE_PTR(obj)) {
-                uint32_t fNameIndex = *reinterpret_cast<uint32_t*>(obj + 0x18);
-                NSLog(@"[SGLOCK] Obj[%d] -> %p | FNameIndex: 0x%X", i, (void*)obj, fNameIndex);
-            }
-        }
-    }
+    // ── Paso 2: Leer VALOR del LocalPlayer ──────────────────────────────────
+    uintptr_t lpPtrAddr = OFF(ADDR_LOCAL_PLAYER_PTR);
+    uintptr_t realLP = *reinterpret_cast<uintptr_t*>(lpPtrAddr);
+    
+    if (doLog) NSLog(@"[SGLOCK] realLP (en 0x%lX) -> %p", lpPtrAddr, (void*)realLP);
+    if (!IS_SAFE_PTR(realLP)) return;
 
-    // ── Paso 2: Diagnóstico de GWorld ───────────────────────────────────────
-    uintptr_t gWorldPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
-    if (doLog) NSLog(@"[SGLOCK] GWorld (0x%lX) -> %p", ADDR_GWORLD, (void*)gWorldPtr);
-    if (!IS_SAFE_PTR(gWorldPtr)) return;
-
-    // ── Paso 3: Diagnóstico de LocalPlayer ──────────────────────────────────
-    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
-    if (doLog) NSLog(@"[SGLOCK] LocalPlayerPtr (0x%lX) -> %p", ADDR_LOCAL_PLAYER_PTR, (void*)lpPtr);
-    if (!IS_SAFE_PTR(lpPtr)) return;
-
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
-    if (doLog) NSLog(@"[SGLOCK] PlayerController -> %p", (void*)ctrl);
+    // ── Paso 3: Controller y Pawn ───────────────────────────────────────────
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(realLP + OFF_PLAYER_CTRL);
     if (!IS_SAFE_PTR(ctrl)) return;
 
     uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
     if (!IS_SAFE_PTR(myPawn)) return;
 
     // ── Paso 4: Escaneo de Actores ──────────────────────────────────────────
-    uintptr_t level = *reinterpret_cast<uintptr_t*>(gWorldPtr + OFF_PersistentLevel);
+    uintptr_t level = *reinterpret_cast<uintptr_t*>(realWorld + OFF_PersistentLevel);
     if (!IS_SAFE_PTR(level)) return;
 
     uintptr_t actorsData = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
@@ -136,7 +128,7 @@ static void AimlockTick(bool doLog) {
 
         FVector enPos = *reinterpret_cast<FVector*>(root + OFF_RelativeLoc);
         float d = myPos.Dist(enPos);
-        if (d > 500.0f && d < 50000.0f && d < minDist) {
+        if (d > 500.0f && d < 30000.0f && d < minDist) {
             minDist = d;
             bestEnemy = actor;
         }
@@ -144,7 +136,7 @@ static void AimlockTick(bool doLog) {
 
     if (!IS_SAFE_PTR(bestEnemy)) return;
 
-    // ── Paso 5: Escritura de Rotación ───────────────────────────────────────
+    // ── Paso 5: Escritura Directa (PAC-SAFE) ────────────────────────────────
     FVector enPos = *reinterpret_cast<FVector*>(*reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp) + OFF_RelativeLoc);
     FRotator tgtRot = VecToRot({enPos.X - myPos.X, enPos.Y - myPos.Y, enPos.Z - myPos.Z});
 
@@ -153,13 +145,13 @@ static void AimlockTick(bool doLog) {
         uintptr_t rotAddr = ctrl + dynamicRotOffset;
         if (IS_SAFE_PTR(rotAddr)) {
             *reinterpret_cast<FRotator*>(rotAddr) = tgtRot;
-            if (doLog) NSLog(@"[SGLOCK] Lock Aplicado: En(%.0f,%.0f)", enPos.X, enPos.Y);
+            if (doLog) NSLog(@"[SGLOCK] Lock! Target: (%.0f, %.0f)", enPos.X, enPos.Y);
         }
     }
 }
 
 // ============================================================================
-// [5. INTERFAZ Y DRIVER (NSTimer)]
+// [5. INTERFAZ Y DRIVER]
 // ============================================================================
 
 @interface SGLockButton : UIButton
@@ -168,7 +160,6 @@ static void AimlockTick(bool doLog) {
 - (void)toggle {
     g_Active = !g_Active;
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
-    NSLog(@"[SGLOCK] Boton presionado -> %d", g_Active);
 }
 @end
 
@@ -196,15 +187,12 @@ static void InjectUI() {
             TimerTick(t);
         }];
         [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-        NSLog(@"[SGLOCK] UI + NSTimer Programados.");
     });
 }
 
 __attribute__((constructor))
 static void init() {
-    g_BaseAddress = GetBaseAddress();
-    NSLog(@"[SGLOCK] Base Address Calculada: %p", (void*)g_BaseAddress);
-
+    InitializeBase();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         InjectUI();
     });
