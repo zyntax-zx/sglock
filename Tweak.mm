@@ -58,8 +58,6 @@ constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rot
 constexpr uintptr_t TOGGLE_SHORTGUN       = 0x9516b2; // bool _ShortGunWP
 
 // Offsets de Clase (UE4 Standard)
-constexpr uintptr_t OFF_Obj_Class         = 0x10;
-constexpr uintptr_t OFF_Obj_Name          = 0x18;
 constexpr uintptr_t OFF_PersistentLevel   = 0x30;
 constexpr uintptr_t OFF_ActorsArray       = 0x98;
 constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
