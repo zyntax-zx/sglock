@@ -49,15 +49,15 @@ static uintptr_t GetBaseAddress() {
 static inline uintptr_t OFF(uintptr_t o) { return g_BaseAddress + o; }
 
 // ============================================================================
-// [3. TRUTH TABLE v10.0 — SDK INITIALIZATION (GUObjectArray Scan)]
+// [3. TRUTH TABLE v10.1 — TELEMETRÍA DE DIAGNÓSTICO]
 // ============================================================================
 
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray Maestro
-constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer
-constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
-constexpr uintptr_t TOGGLE_SHORTGUN       = 0x9516b2; // bool _ShortGunWP
+constexpr uintptr_t ADDR_GWORLD           = 0x951770;
+constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; 
+constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; 
+constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; 
 
-// Offsets de Clase (UE4 Standard)
+// Offsets Estándar
 constexpr uintptr_t OFF_PersistentLevel   = 0x30;
 constexpr uintptr_t OFF_ActorsArray       = 0x98;
 constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
@@ -69,82 +69,52 @@ constexpr uintptr_t OFF_RelativeLoc       = 0x11c;
 #define IS_SAFE_PTR(p)     (IS_VALID_PTR(p) && (((uintptr_t)(p) & 0x7) == 0))
 
 static bool g_Active = false;
-static uintptr_t g_CachedWorld = 0;
-static uintptr_t g_CachedPlayer = 0;
 
 // ============================================================================
-// [4. LÓGICA DE ESCANEO (findEssentials)]
+// [4. LÓGICA DE AIMLOCK (MODO DIAGNÓSTICO RUIDOSO)]
 // ============================================================================
-
-static void findEssentials() {
-    uintptr_t objArrayBase = OFF(ADDR_GOBJECTS);
-    if (!IS_SAFE_PTR(objArrayBase)) return;
-
-    uintptr_t objects = *reinterpret_cast<uintptr_t*>(objArrayBase + 0x10);
-    int numObjects = *reinterpret_cast<int*>(objArrayBase + 0x18);
-    
-    if (!IS_SAFE_PTR(objects) || numObjects <= 0) return;
-
-    // Escaneo de los primeros 10,000 objetos para inicializar el SDK
-    int scanLimit = (numObjects > 10000) ? 10000 : numObjects;
-    
-    uintptr_t foundWorld = 0;
-    uintptr_t foundPlayer = 0;
-
-    for (int i = 0; i < scanLimit; i++) {
-        uintptr_t obj = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
-        if (!IS_SAFE_PTR(obj)) continue;
-
-        // Heurística de Mundo: Tiene un PersistentLevel en 0x30 y no es un Actor
-        uintptr_t level = *reinterpret_cast<uintptr_t*>(obj + OFF_PersistentLevel);
-        if (IS_SAFE_PTR(level)) {
-            uintptr_t actors = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
-            if (IS_SAFE_PTR(actors)) {
-                foundWorld = obj;
-            }
-        }
-
-        // Heurística de Jugador: Se encuentra en ADDR_LOCAL_PLAYER_PTR como fallback
-        if (i == 0) { // Check once
-            uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
-            if (IS_SAFE_PTR(lpPtr)) foundPlayer = lpPtr;
-        }
-
-        if (foundWorld && foundPlayer) break;
-    }
-
-    if (foundWorld && foundPlayer) {
-        if (g_CachedWorld != foundWorld || g_CachedPlayer != foundPlayer) {
-            g_CachedWorld = foundWorld;
-            g_CachedPlayer = foundPlayer;
-            NSLog(@"[SGLOCK] SDK Inicializado. Mundo: %p | Jugador: %p", (void*)g_CachedWorld, (void*)g_CachedPlayer);
-        }
-    }
-}
 
 static void AimlockTick(bool doLog) {
     if (doLog) NSLog(@"[SGLOCK] Heartbeat - Ciclo vivo. Toggle: %d", g_Active);
-    
-    // ── Paso 1: Inicializar SDK dinámicamente ───────────────────────────────
-    findEssentials();
-
     if (!g_Active) return;
 
-    // ── Paso 2: Validación de Toggle dinámico ShortGun ──────────────────────
-    bool gameToggle = *reinterpret_cast<bool*>(OFF(TOGGLE_SHORTGUN));
-    if (!gameToggle) return;
+    // ── Paso 1: Diagnóstico de GObjects ─────────────────────────────────────
+    uintptr_t gObjectsBase = OFF(ADDR_GOBJECTS);
+    if (doLog) NSLog(@"[SGLOCK] Leyendo GObjects en Base + 0x%lX...", ADDR_GOBJECTS);
+    
+    uintptr_t objects = *reinterpret_cast<uintptr_t*>(gObjectsBase + 0x10);
+    int numObjects = *reinterpret_cast<int*>(gObjectsBase + 0x18);
+    if (doLog) NSLog(@"[SGLOCK] GObjects -> %p | Num: %d", (void*)objects, numObjects);
 
-    // ── Paso 3: Obtener Controller y Pawn ───────────────────────────────────
-    if (!IS_SAFE_PTR(g_CachedWorld) || !IS_SAFE_PTR(g_CachedPlayer)) return;
+    if (IS_SAFE_PTR(objects) && numObjects > 10 && doLog) {
+        for (int i = 0; i < 10; i++) {
+            uintptr_t obj = *reinterpret_cast<uintptr_t*>(objects + (i * 24));
+            if (IS_SAFE_PTR(obj)) {
+                uint32_t fNameIndex = *reinterpret_cast<uint32_t*>(obj + 0x18);
+                NSLog(@"[SGLOCK] Obj[%d] -> %p | FNameIndex: 0x%X", i, (void*)obj, fNameIndex);
+            }
+        }
+    }
 
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(g_CachedPlayer + OFF_PLAYER_CTRL);
+    // ── Paso 2: Diagnóstico de GWorld ───────────────────────────────────────
+    uintptr_t gWorldPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
+    if (doLog) NSLog(@"[SGLOCK] GWorld (0x%lX) -> %p", ADDR_GWORLD, (void*)gWorldPtr);
+    if (!IS_SAFE_PTR(gWorldPtr)) return;
+
+    // ── Paso 3: Diagnóstico de LocalPlayer ──────────────────────────────────
+    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
+    if (doLog) NSLog(@"[SGLOCK] LocalPlayerPtr (0x%lX) -> %p", ADDR_LOCAL_PLAYER_PTR, (void*)lpPtr);
+    if (!IS_SAFE_PTR(lpPtr)) return;
+
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
+    if (doLog) NSLog(@"[SGLOCK] PlayerController -> %p", (void*)ctrl);
     if (!IS_SAFE_PTR(ctrl)) return;
 
     uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
     if (!IS_SAFE_PTR(myPawn)) return;
 
     // ── Paso 4: Escaneo de Actores ──────────────────────────────────────────
-    uintptr_t level = *reinterpret_cast<uintptr_t*>(g_CachedWorld + OFF_PersistentLevel);
+    uintptr_t level = *reinterpret_cast<uintptr_t*>(gWorldPtr + OFF_PersistentLevel);
     if (!IS_SAFE_PTR(level)) return;
 
     uintptr_t actorsData = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
@@ -174,9 +144,8 @@ static void AimlockTick(bool doLog) {
 
     if (!IS_SAFE_PTR(bestEnemy)) return;
 
-    // ── Paso 5: Escritura de Rotación (PAC-SAFE) ────────────────────────────
-    uintptr_t enRoot = *reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp);
-    FVector enPos = *reinterpret_cast<FVector*>(enRoot + OFF_RelativeLoc);
+    // ── Paso 5: Escritura de Rotación ───────────────────────────────────────
+    FVector enPos = *reinterpret_cast<FVector*>(*reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp) + OFF_RelativeLoc);
     FRotator tgtRot = VecToRot({enPos.X - myPos.X, enPos.Y - myPos.Y, enPos.Z - myPos.Z});
 
     uintptr_t dynamicRotOffset = *reinterpret_cast<uintptr_t*>(OFF(ADDR_ROT_BASE_OFF));
@@ -199,6 +168,7 @@ static void AimlockTick(bool doLog) {
 - (void)toggle {
     g_Active = !g_Active;
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
+    NSLog(@"[SGLOCK] Boton presionado -> %d", g_Active);
 }
 @end
 
@@ -233,7 +203,7 @@ static void InjectUI() {
 __attribute__((constructor))
 static void init() {
     g_BaseAddress = GetBaseAddress();
-    NSLog(@"[SGLOCK] v10.0 iniciada. Base Address: 0x%llX", (unsigned long long)g_BaseAddress);
+    NSLog(@"[SGLOCK] Base Address Calculada: %p", (void*)g_BaseAddress);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         InjectUI();
