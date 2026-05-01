@@ -53,7 +53,6 @@ static inline uintptr_t OFF(uintptr_t o) { return g_BaseAddress + o; }
 // ============================================================================
 
 constexpr uintptr_t ADDR_GEWORLD           = 0x951768; // Puntero real _GEWorld
-constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray
 constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer
 constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
 
