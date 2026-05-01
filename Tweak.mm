@@ -22,7 +22,7 @@ struct FVector {
 
 struct FRotator { float Pitch, Yaw, Roll; };
 
-static FRotator VecToRot(FVector d) {
+__attribute__((unused)) static FRotator VecToRot(FVector d) {
     float radToDeg = 180.f / (float)M_PI;
     return {
         atan2f(d.Z, sqrtf(d.X*d.X + d.Y*d.Y)) * radToDeg,
@@ -35,7 +35,7 @@ static FRotator VecToRot(FVector d) {
 // [2. PATTERN SCANNER (AOB SCAN) — BYPASS PROTECCIONES]
 // ============================================================================
 
-static uintptr_t FindPattern(uintptr_t start, uintptr_t size, const char* pattern, const char* mask) {
+__attribute__((unused)) static uintptr_t FindPattern(uintptr_t start, uintptr_t size, const char* pattern, const char* mask) {
     size_t patternLen = strlen(mask);
     for (uintptr_t i = 0; i < size - patternLen; i++) {
         bool found = true;
