@@ -35,7 +35,6 @@ static FRotator VecToRot(FVector d) {
 // Offsets confirmados v2.0
 constexpr uintptr_t ADDR_GEWORLD           = 0x951768; 
 constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR  = 0x951788;
-constexpr uintptr_t ADDR_ROT_BASE_OFF      = 0x951658; 
 
 // Offsets de Funciones Nativas (PAC-Safe)
 constexpr uintptr_t FUNC_ADD_YAW           = 0x1e3294;
