@@ -18,7 +18,6 @@ constexpr uintptr_t FUNC_ADD_YAW         = 0x1e3294;
 constexpr uintptr_t FUNC_ADD_PITCH       = 0x1e33dc;
 
 // Offsets de Datos
-constexpr uintptr_t ADDR_GEWORLD         = 0x951768;
 constexpr uintptr_t ADDR_LOCAL_PLAYER    = 0x951788;
 
 // Hook Config
