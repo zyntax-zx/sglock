@@ -43,24 +43,25 @@ static uintptr_t GetBaseAddress() {
             return (uintptr_t)_dyld_get_image_header(i);
         }
     }
-    return (uintptr_t)_dyld_get_image_header(0); // Fallback
+    return (uintptr_t)_dyld_get_image_header(0);
 }
 
 static inline uintptr_t OFF(uintptr_t o) { return g_BaseAddress + o; }
 
 // ============================================================================
-// [3. TRUTH TABLE v8.5 — DIAGNÓSTICO PROFUNDO]
+// [3. TRUTH TABLE v9.0 — PUNTEROS REALES (PURE MEMORY)]
 // ============================================================================
 
-constexpr uintptr_t ADDR_GWORLD           = 0x951770; 
-constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; 
+constexpr uintptr_t ADDR_GEWORLD           = 0x951768; // Puntero real _GEWorld
+constexpr uintptr_t ADDR_GOBJECTS         = 0x951778; // GUObjectArray
+constexpr uintptr_t ADDR_LOCAL_PLAYER_PTR = 0x951788; // _g_LocalPlayer
+constexpr uintptr_t ADDR_ROT_BASE_OFF     = 0x951658; // Offset dinámico de rotación
 
+// Jerarquía Unreal Engine
 constexpr uintptr_t OFF_PersistentLevel   = 0x30;
 constexpr uintptr_t OFF_ActorsArray       = 0x98;
-constexpr uintptr_t OFF_GAME_INSTANCE     = 0x180;
-constexpr uintptr_t OFF_LOCAL_PLAYERS     = 0x38;
-constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;
-constexpr uintptr_t OFF_Pawn              = 0x3d0;
+constexpr uintptr_t OFF_PLAYER_CTRL       = 0x30;   // ULocalPlayer -> Controller
+constexpr uintptr_t OFF_Pawn              = 0x3d0;  // Controller -> Pawn
 constexpr uintptr_t OFF_RootComp          = 0x130;
 constexpr uintptr_t OFF_RelativeLoc       = 0x11c;
 
@@ -70,37 +71,33 @@ constexpr uintptr_t OFF_RelativeLoc       = 0x11c;
 static bool g_Active = false;
 
 // ============================================================================
-// [4. LÓGICA DE AIMLOCK (NSTimer Tick)]
+// [4. LÓGICA DE AIMLOCK (MODO LECTURA PURA v9.0)]
 // ============================================================================
 
 static void AimlockTick(bool doLog) {
-    if (doLog) NSLog(@"[SGLOCK] Heartbeat - Ciclo de ejecucion vivo. Toggle: %d", g_Active);
+    if (doLog) NSLog(@"[SGLOCK] Heartbeat - Ciclo vivo. Toggle: %d", g_Active);
     if (!g_Active) return;
 
-    // ── Paso 1: Navegación de GWorld ────────────────────────────────────────
-    uintptr_t* wPtr = reinterpret_cast<uintptr_t*>(OFF(ADDR_GWORLD));
-    if (!IS_SAFE_PTR(wPtr)) { if (doLog) NSLog(@"[SGLOCK] FAIL: Direccion de GWorld invalida."); return; }
-    
-    uintptr_t world = *wPtr;
-    if (!IS_SAFE_PTR(world)) { if (doLog) NSLog(@"[SGLOCK] FAIL: GWorld nulo."); return; }
+    // ── Paso 1: Obtener GEWorld (0x951768) ──────────────────────────────────
+    uintptr_t worldAddr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_GEWORLD));
+    if (!IS_SAFE_PTR(worldAddr)) {
+        if (doLog) NSLog(@"[SGLOCK] Esperando GEWorld...");
+        return;
+    }
+    if (doLog) NSLog(@"[SGLOCK] GEWorld detectado en: 0x%lX", worldAddr);
 
-    uintptr_t gi = *reinterpret_cast<uintptr_t*>(world + OFF_GAME_INSTANCE);
-    if (!IS_SAFE_PTR(gi)) { if (doLog) NSLog(@"[SGLOCK] FAIL: GameInstance nulo."); return; }
+    // ── Paso 2: Obtener LocalPlayer y Controller ────────────────────────────
+    uintptr_t lpPtr = *reinterpret_cast<uintptr_t*>(OFF(ADDR_LOCAL_PLAYER_PTR));
+    if (!IS_SAFE_PTR(lpPtr)) return;
 
-    uintptr_t lpArr = *reinterpret_cast<uintptr_t*>(gi + OFF_LOCAL_PLAYERS);
-    if (!IS_SAFE_PTR(lpArr)) return;
-
-    uintptr_t lp = *reinterpret_cast<uintptr_t*>(lpArr);
-    if (!IS_SAFE_PTR(lp)) return;
-
-    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lp + OFF_PLAYER_CTRL);
+    uintptr_t ctrl = *reinterpret_cast<uintptr_t*>(lpPtr + OFF_PLAYER_CTRL);
     if (!IS_SAFE_PTR(ctrl)) return;
 
     uintptr_t myPawn = *reinterpret_cast<uintptr_t*>(ctrl + OFF_Pawn);
     if (!IS_SAFE_PTR(myPawn)) return;
 
-    // ── Paso 2: Escaneo de Enemigos ─────────────────────────────────────────
-    uintptr_t level = *reinterpret_cast<uintptr_t*>(world + OFF_PersistentLevel);
+    // ── Paso 3: Escaneo de Actores (PersistentLevel) ────────────────────────
+    uintptr_t level = *reinterpret_cast<uintptr_t*>(worldAddr + OFF_PersistentLevel);
     if (!IS_SAFE_PTR(level)) return;
 
     uintptr_t actorsData = *reinterpret_cast<uintptr_t*>(level + OFF_ActorsArray);
@@ -130,22 +127,24 @@ static void AimlockTick(bool doLog) {
 
     if (!IS_SAFE_PTR(bestEnemy)) return;
 
-    // ── Paso 3: Escritura ───────────────────────────────────────────────────
-    FVector enPos = *reinterpret_cast<FVector*>(*reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp) + OFF_RelativeLoc);
+    // ── Paso 4: Escritura de Rotación (PAC-SAFE) ────────────────────────────
+    uintptr_t enRoot = *reinterpret_cast<uintptr_t*>(bestEnemy + OFF_RootComp);
+    FVector enPos = *reinterpret_cast<FVector*>(enRoot + OFF_RelativeLoc);
     FRotator tgtRot = VecToRot({enPos.X - myPos.X, enPos.Y - myPos.Y, enPos.Z - myPos.Z});
 
+    // Lee el offset dinámico de rotación (0x951658)
     uintptr_t dynamicRotOffset = *reinterpret_cast<uintptr_t*>(OFF(ADDR_ROT_BASE_OFF));
     if (dynamicRotOffset > 0 && dynamicRotOffset < 0x2000) {
         uintptr_t rotAddr = ctrl + dynamicRotOffset;
         if (IS_SAFE_PTR(rotAddr)) {
             *reinterpret_cast<FRotator*>(rotAddr) = tgtRot;
-            if (doLog) NSLog(@"[SGLOCK] Lock Aplicado: Mi(%.0f,%.0f) -> En(%.0f,%.0f)", myPos.X, myPos.Y, enPos.X, enPos.Y);
+            if (doLog) NSLog(@"[SGLOCK] Lock Aplicado: En(%.0f,%.0f)", enPos.X, enPos.Y);
         }
     }
 }
 
 // ============================================================================
-// [5. INTERFAZ Y DRIVER]
+// [5. INTERFAZ Y DRIVER (NSTimer)]
 // ============================================================================
 
 @interface SGLockButton : UIButton
@@ -154,12 +153,13 @@ static void AimlockTick(bool doLog) {
 - (void)toggle {
     g_Active = !g_Active;
     self.backgroundColor = g_Active ? UIColor.greenColor : UIColor.redColor;
+    NSLog(@"[SGLOCK] Toggle: %d", g_Active);
 }
 @end
 
 static int g_LogCounter = 0;
 static void TimerTick(NSTimer *timer) {
-    bool doLog = (++g_LogCounter >= 20); // 1 log cada segundo (20 * 0.05)
+    bool doLog = (++g_LogCounter >= 20);
     if (doLog) g_LogCounter = 0;
     AimlockTick(doLog);
 }
@@ -177,18 +177,10 @@ static void InjectUI() {
         [btn addTarget:btn action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
         [win addSubview:btn];
 
-        [NSTimer scheduledTimerWithTimeInterval:0.05
-                                         target:[NSBlockOperation blockOperationWithBlock:^{ TimerTick(nil); }]
-                                       selector:@selector(main)
-                                       userInfo:nil
-                                        repeats:YES];
-        
-        // Forma correcta de programar el timer en el main loop
         NSTimer *timer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer * _Nonnull t) {
             TimerTick(t);
         }];
         [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-        
         NSLog(@"[SGLOCK] UI + NSTimer Programados.");
     });
 }
@@ -196,7 +188,7 @@ static void InjectUI() {
 __attribute__((constructor))
 static void init() {
     g_BaseAddress = GetBaseAddress();
-    NSLog(@"[SGLOCK] v8.5 iniciada. Base Address: 0x%llX", (unsigned long long)g_BaseAddress);
+    NSLog(@"[SGLOCK] v9.0 iniciada. Base Address: 0x%llX", (unsigned long long)g_BaseAddress);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         InjectUI();
