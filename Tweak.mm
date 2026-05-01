@@ -102,8 +102,6 @@ static void AimlockTick(bool doLog) {
     // ── Paso 1: Escaneo de GWorld (Si no se ha encontrado) ──────────────────
     if (!g_WorldPtr) {
         // Patrón genérico de GWorld (Ajustado para UE4 ARM64)
-        const char* pattern = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-        const char* mask    = "????????????????"; // Placeholder - En uso real se define un AOB específico
         
         // Como fallback, usamos el offset de GUObjectArray + 0x10 que pide el usuario
         uintptr_t gObjectsAddr = g_BaseAddress + 0x951778;
