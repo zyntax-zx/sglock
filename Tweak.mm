@@ -175,7 +175,7 @@ static void InjectUI() {
 __attribute__((constructor))
 static void init() {
     // Jailed-Safe: Binario principal siempre es el indice 0
-    g_Base = _dyld_get_image_vmaddr_slide(0) + 0x100000000;
+    g_Base = _dyld_get_image_vmaddr_slide(0) + 0x100000000ULL;
     NSLog(@"[SGLOCK_FINAL] Tweak cargado. Base detectada: 0x%llX", (unsigned long long)g_Base);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
